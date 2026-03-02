@@ -52,7 +52,7 @@ class LehmannRep(Dynamical):
     @property
     def naux(self):
         """Number of auxiliary states in the Lehmann representation."""
-        return self.energies.shape[0]
+        return self.energies.shape
     
     @property
     def nphys(self):
@@ -221,7 +221,7 @@ class SE_LehmannRep(LehmannRep, SelfEnergy):
         return SE_LehmannRep(proj_statics, proj_lehmanns, overlaps=proj_overlaps)
 
 
-    def to_moments(self, nmom):
+    def to_moments(self, nmom=None, split=False, chempot=None):
         """Convert the Lehmann representation to moment representation.
 
         Parameters
@@ -234,11 +234,38 @@ class SE_LehmannRep(LehmannRep, SelfEnergy):
         moments : SE_MomentRep
             Moment representation of the Green's function.
         """
-        moments = []
-        for s in range(self.nsectors):
-            moms = self.lehmanns[s].moments(range(nmom))
-            moments.append(moms)
-        return SE_MomentRep(self.statics, np.array(moments), overlap=self.overlaps, hermitian=self.hermitian)
+
+        if nmom is None:
+            # FIXME: Determine proper nmom for both odd and even input moms
+            nmom = 2 * self.lehmanns[0].energies.shape[0] // self.lehmanns[0].nphys - 2
+
+        if split:
+
+            if self.nsectors !=1:
+                raise NotImplementedError("Split self-energy moments representation is only implemented for single sector spectral representations.")
+            
+            else:
+
+                statics = self.statics
+                overlaps = None
+
+                if chempot is not None:
+                    se = self.lehmanns[0].copy(chempot=chempot)  
+                else:
+                    se = self.lehmanns[0]
+
+                seh = se.occupied().moments(range(nmom))
+                sep = se.virtual().moments(range(nmom))
+                moments = np.array([seh, sep])
+
+        else:
+            statics = self.statics
+            overlaps = self.overlaps
+            moments = []
+            for s in range(self.nsectors):
+                moms = self.lehmanns[s].moments(range(nmom))
+                moments.append(moms)
+        return SE_MomentRep(statics, np.array(moments), overlap=overlaps, hermitian=self.hermitian)
 
 
 

@@ -23,9 +23,8 @@ def make_static_self_energy(
         emb,
         proj=1, 
         sym_moms=False, 
-        with_mf=False, 
+        static_se_mode ='cluster_moments_corr', 
         use_sym=True, 
-        orth_basis=False
         ):
     """
     Construct global static self-energy equal to the first Green's function moment.
@@ -38,8 +37,8 @@ def make_static_self_energy(
         Number of projectors to use (1 or 2)
     sym_moms : bool
         Hermitise the static self energy
-    with_mf : bool
-        Include the fock matrix in the static self energy
+    se_static_mode : string or None ('cluster_moments', 'cluster_moments_corr', 'local_fock_corr', 'global_fock_corr')
+        Method to determine static self-energy, 'cluster_moments' uses the cluster moments, 'cluster_moments_corr' uses the cluster moments with a mean-field Fock matrix correction, 'local_fock_corr' uses the local correlated Fock matrix correction, and 'global_fock_corr' uses the global correlated Fock matrix correction.
     use_sym : bool
         Use symmetry
     
@@ -49,10 +48,18 @@ def make_static_self_energy(
         Static part of self-energy (MO basis)   
     """
 
+    if static_se_mode not in ['cluster_moments', 'cluster_moments_corr', 'cluster_fock_corr', 'global_fock_corr']:
+        raise ValueError("Invalid method for static self-energy construction: %s"%static_se_mode)
+    
     fock = emb.get_fock()
-    static_self_energy = np.zeros([2] + list(fock.shape), dtype=fock.dtype)
+    static_self_energy = np.zeros(fock.shape, dtype=fock.dtype)
+            
 
-    nao, nmo = emb.mo_coeff.shape
+    if static_se_mode in ['cluster_moments_corr']:
+        global_fock = emb.get_fock()
+    elif static_se_mode in ['cluster_fock_corr', 'global_fock_corr']:
+        dm1 = emb._make_rdm1_ccsd_global_wf(emb, ao_basis=True)
+        global_fock = emb.mf.get_fock(dm=dm1) 
 
     fragments = emb.get_fragments(sym_parent=None) if use_sym else emb.get_fragments()
     for i, f in enumerate(fragments):
@@ -71,24 +78,37 @@ def make_static_self_energy(
             raise Exception("Cluster has no Green's function or self-energy")
         static = gf.moments[:,1].copy()
         overlap = gf.moments[:,0].copy()
-        if not with_mf:
-            fock_cls = f.cluster.c_active.T @ fock @ f.cluster.c_active
+        static = np.sum(static, axis=0)
+
+        if static_se_mode in ['cluster_moments_corr', 'cluster_fock_corr', 'global_fock_corr']:
+
+            if static_se_mode == 'cluster_moments_corr':
+                fock_cls = f.cluster.c_active.T @ global_fock @ f.cluster.c_active
+            elif static_se_mode == 'global_fock_corr':
+                fock_cls = f.cluster.c_active.T @ global_fock @ f.cluster.c_active
+            elif static_se_mode == 'cluster_fock_corr':
+                dm1 = 2*gf.moments[0,0] # Zeroth hole moment of GF gives the 1-RDM
+                mf_cls = f.hamil.to_pyscf_mf(allow_df=True)[0]                
+                fock_cls = mf_cls.get_fock(dm=dm1)
+
+            else:
+                raise ValueError("Invalid method for static self-energy double counting correction")
+            #print(np.diag(fock_cls))
             nocc = f.cluster.nocc
 
-            
-            fock_oo = np.zeros_like(fock_cls)
-            fock_oo[:nocc, :nocc] = fock_cls[:nocc, :nocc]
-            static[0] -= fock_oo
-            
-            fock_vv = np.zeros_like(fock_cls)
-            fock_vv[nocc:, nocc:] = fock_cls[nocc:, nocc:]
-            static[1] -= fock_vv
-
-
-        if orth_basis:
-            for s in range(static.shape[0]):
-                orth, _ = matrix_power(overlap[s], -0.5, hermitian=gf.hermitian, return_error=False)
-                static[s] = orth @ static[s] @ orth
+            if static.ndim == 2:
+                static -= fock_cls
+            elif static.ndim == 3:
+                raise RuntimeError("Static self-energy should be summed over sectors")
+                fock_oo = np.zeros_like(fock_cls)
+                fock_oo[:nocc, :nocc] = fock_cls[:nocc, :nocc]
+                static[0] -= fock_oo
+                
+                fock_vv = np.zeros_like(fock_cls)
+                fock_vv[nocc:, nocc:] = fock_cls[nocc:, nocc:]
+                static[1] -= fock_vv
+            else:
+                raise ValueError("Invalid shape for static self-energy")
 
         if proj == 1:
             static_frag = cfc @ static
@@ -109,8 +129,16 @@ def make_static_self_energy(
                     mf_child = child.get_overlap('mo|frag')
                     static_self_energy += mf_child @ static_frag @ mf_child.T
 
+    if static_se_mode in ['cluster_moments_corr', 'cluster_fock_corr', 'global_fock_corr']:        
+        if static_self_energy.ndim == 2:
+            static_self_energy += emb.mo_coeff.T @ global_fock @ emb.mo_coeff
+        else:
+            raise RuntimeError("Static self-energy should be summed over sectors")
+            static[0][:nocc, :nocc] += fock_mo[:nocc, :nocc]
+            static[1][nocc:, nocc:] += fock_mo[nocc:, nocc:]
+
     if sym_moms:
-        static_self_energy = 0.5 * (static_self_energy + static_self_energy.transpose(0,2,1).conj())
+        static_self_energy = 0.5 * (static_self_energy + static_self_energy.swapaxes(-1, -2).conj())
     
     return static_self_energy
 
@@ -119,14 +147,12 @@ def make_self_energy(
         emb,
         proj=1, 
         se_mode='moments', 
-        combine_sectors=None, 
         use_sym=True, 
         hermitian=None, 
         chempot_clus=None, 
-        orth_basis=False, 
         project_before=False,
         non_local_se = None, 
-        se_dc_mode = 'subtract', 
+        se_dc_mode = 'global', 
         ):
 
     """
@@ -140,7 +166,7 @@ def make_self_energy(
         Use symmetry to reconstruct self-energy
     proj : int
         Number of projectors to use (1 or 2)
-    se_mode : string ('lehmann', 'moments', 'moments_mblgf' or 'spectral')
+    se_mode : string ('lehmann', 'moments', 'lehmann_moments' or 'spectral')
         Method used to combine cluster self-energies.
     chempot_clus : string or None ('aux' or 'auf')
         Method to optimize chemical potential in cluster spectral function.
@@ -148,10 +174,10 @@ def make_self_energy(
         Whether to project self-energy before or after sector combination and/or Lanczos.
     non_local_se : string or None ('gw_rpa' or 'gw_tda')
         Whether to include non-local self-energy from full system GW calculation, and if so, which polarizability to use in the GW calculation.
-    se_dc_mode : string ('subtract' or 'project')
+    se_dc_mode : string ('cluster' or 'global')
         Method to apply double counting correction when combining embedding self-energy with full system GW self-energy. 
-        'subtract' subtracts the local GW self-energy moments from the cluster self-energy moments before projection.
-        'project' projects out the cluster contribution to the full GW self-energy.
+        'cluster' subtracts the local GW self-energy moments from the cluster self-energy moments before projection.
+        'global' subtracts the full GW self-energy projected into the cluster.
 
     Returns
     -------
@@ -159,20 +185,19 @@ def make_self_energy(
         Full system self-energy (MO basis)
     """
 
-    if se_mode not in ['lehmann', 'moments', 'moments_mblgf', 'spectral']:
+    if se_mode not in ['lehmann', 'moments', 'lehmann_moments', 'spectral']:
         raise ValueError("Invalid self-energy construction method")
 
     if non_local_se is not None and non_local_se.lower() not in ['gw_rpa', 'gw_tda']:
         raise ValueError("Invalid non-local self-energy method")
     
-    if se_dc_mode not in ['subtract', 'project']:
+    if se_dc_mode not in ['cluster', 'global']:
         raise ValueError("Invalid double counting correction method")
     
-    if se_mode not in ['moments', 'moments_mblgf'] and non_local_se is not None:
+    if se_mode not in ['moments', 'lehmann_moments'] and non_local_se is not None:
         raise NotImplementedError("Double counting correction only implemented for moment-based self-energy construction")
     
     hermitian = emb.opts.hermitian_lanczos if hermitian is None else hermitian
-    combine_sectors = emb.opts.combine_sectors_in_cluster if combine_sectors is None else combine_sectors
 
     if non_local_se is not None:
         if non_local_se.lower() == 'gw_rpa':
@@ -192,25 +217,27 @@ def make_self_energy(
         cfc = fc.T @ fc
         
         # Get cluster self-energy and Green's function
+        
+        gf, se = None, None
         if f.results.gf is not None:
             using_gf = True
             gf = f.results.gf
-            se = f.results.gf.to_se_moments(orth_basis=orth_basis)
+            #se = f.results.gf.to_se_moments(orth_basis=False)
             nmom_gf = gf.nmom
-            nmom_se = se.nmom
+            nmom_se = nmom_gf - 2
         elif f.results.se is not None:
             using_gf = False
             se = f.results.se
-            gf = f.results.se.to_gf_moments()
+            #gf = f.results.se.to_gf_moments()
             nmom_se = se.nmom
-            nmom_gf = gf.nmom
+            nmom_gf = nmom_se + 2
         else:
             raise Exception("No fragment Green's function or self-energy found")
 
         # Build double counting correction for non-local self-energy if needed
-        if non_local_se is not None and se_dc_mode == 'subtract':
+        if non_local_se is not None and se_dc_mode == 'cluster':
             se_dc = make_fragment_double_counting_correction(f, se_mode=se_mode, double_counting=non_local_se, nmom_se=nmom_se)
-        elif non_local_se is not None and se_dc_mode == 'project':
+        elif non_local_se is not None and se_dc_mode == 'global':
             # rotate into cluster basis
             se_dc = se_nl.rotate(mc.T)
         else:
@@ -222,43 +249,35 @@ def make_self_energy(
             # hermitize se_dc for CCSD?
 
         if project_before:
-            se = se.project(cfc, proj)
-            gf = gf.project(cfc, proj)
-            if non_local_se is not None:
-                se_dc = se_dc.project(cfc, proj)
+            se = se.project(cfc, proj) if se is not None else None
+            gf = gf.project(cfc, proj) if gf is not None else None
+            se_dc = se_dc.project(cfc, proj) if se_dc is not None else None
             
-        #gf = gf.project(cfc, proj)
-        #se = se.orthogonalize()
-        
+
         # projected Lehmann representation for cluster self-energy
-        if se_mode == 'lehmann':
-            if combine_sectors:
+        if se_mode == 'lehmann' or se_mode == 'lehmann_moments':
+            if gf is not None:
                 se = gf.to_spectral(hermitian=hermitian).combine_sectors(greens_function=using_gf).to_se_lehmann()
             else:
-                se = gf.to_spectral(hermitian=hermitian).to_se_lehmann()
+                se = se.to_spectral(hermitian=hermitian).combine_sectors(greens_function=using_gf).to_se_lehmann()
 
-        # independent SE moments corresponding to particle and hole Green's functions
+
         elif se_mode == 'moments':
-            if combine_sectors:
-                se = se.combine_sectors(hermitian=hermitian, greens_function=using_gf)
-            else:
-                se = se
-
-        # effective SE moments after performing Block Lanczos
-        elif se_mode == 'moments_mblgf':
-
-            if combine_sectors:
+            if gf is not None:
+                # effective SE moments after performing Block Lanczos (CCSD, FCI etc.)
                 spec = gf.to_spectral(hermitian=hermitian)
                 spec = spec.combine_sectors(greens_function=using_gf)
                 if chempot_clus is not None:
                     spec = spec.optimize_chempot(f.cluster.nocc*2, method=chempot_clus, occupancy=2)
                 se = spec.to_se_moments(split=True, nmom=nmom_se)
+
             else:
-                se = gf.to_spectral(hermitian=hermitian).to_se_moments()
-                
+                # SE particle/hole moments already corresponds to full GF (GW, ADC2 etc.)
+                se = se 
                 
         # use full spectral representation in cluster 
         elif se_mode == 'spectral':
+            raise NotImplementedError("Spectral self-energy construction not implemented yet")
             se = se.to_spectral(hermitian=hermitian)
             if combine_sectors:
                 se.combine_sectors()
@@ -286,11 +305,14 @@ def make_self_energy(
     #se = reduce(type(se).combine, ses_mo)
     se = type(se).combine(*ses_mo)
 
-    if non_local_se is not None:
-        se._moments += se_nl._moments[:,:se.nmom]
-
     if se_mode == 'lehmann':
         se = se.remove_degeneracies(etol=emb.opts.se_eval_tol, dtol=emb.opts.se_degen_tol)
+    elif se_mode == 'lehmann_moments':
+        se = se.to_moments(split=True, nmom=nmom_se)
+
+
+    if non_local_se is not None:
+        se._moments += se_nl._moments[:,:se.nmom]
     #assert se.hermitian == hermitian, "Hermiticity of combined self-energy does not match specified value"
     #se._static = np.diag(emb.mf.mo_energy)
     return se

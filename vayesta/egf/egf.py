@@ -36,26 +36,26 @@ from dyson.util.moments import se_moments_to_gf_moments, gf_moments_to_se_moment
 @dataclasses.dataclass
 class Options(REWF.Options):
     """Options for EGF calculations."""
-    proj: int = 2     # Number of projectors used on self-energy (1, 2)
+    proj: int = 1     # Number of projectors used on self-energy (1, 2)
     proj_static_se: int = None # Number of projectors used on static self-energy (same as proj if None)
     use_sym: bool = True # Use symmetry for self-energy reconstruction
-    se_degen_tol: float = 1e-6 # Tolerance for degeneracy of self-energy poles
-    se_eval_tol: float = 1e-6  # Tolerance for self-energy eignvalues
-    img_space : bool = True    # Use image space for self-energy reconstruction
-    drop_non_causal: bool = False # Drop non-causal poles
+
+    
     chempot_global: str = None # Use auxiliary shift to ensure correct electron number in the physical space (None, 'auf', 'aux')
     chempot_clus: str = 'auto' # Use auxiliary shift to ensure correct electron number in the fragment space (None, 'auf', 'aux')
     se_mode: str = 'moments_mblgf' # Mode for self-energy reconstruction (moments, lehmann)
-    se_static: str = 'cluster_moments_corr' # Method for static self-energy (cluster_moments, fock, fock_corr, cluster_fock_corr)
+    static_se_mode: str = 'cluster_moments_corr' # Method for static self-energy (cluster_moments, fock, fock_corr, cluster_fock_corr)
     nmom_se: int = None      # Number of conserved moments for self-energy
-    non_local_se: str = None # Non-local self-energy (GW, CCSD, FCI)
-    se_dc_mode: str = 'subtract' # Mode for double counting correction of non-local self-energy (subtract, project)
+    global_1dm: bool = False # Use global 1DM to normalise SE moments
     sym_moms: bool = True # Use symmetrized moments
-    hermitian_lanczos: bool = True # Use hermitian Lanczos algorithm 
-    global_1dm: bool = False  # Use global 1DM for zeroth moments
-    global_1dm_static: bool = False  # Use Fock matrix evaluated at global 1DM for static self-energy
-    static_with_mf: bool = False # Include mean-field in cluster static self-energy
-    combine_sectors_in_cluster: bool = True # Combine sectors when reconstructing self-energy in cluster
+    hermitian_lanczos: bool = False # Use hermitian Lanczos algorithm 
+    img_space : bool = True    # Use image space for self-energy reconstruction
+    drop_non_causal: bool = False # Drop non-causal poles
+    se_degen_tol: float = 1e-6 # Tolerance for degeneracy of self-energy poles
+    se_eval_tol: float = 1e-6  # Tolerance for self-energy eignvalues
+
+    non_local_se: str = None # Non-local self-energy (GW, CCSD, FCI)
+    se_dc_mode: str = 'global' # Mode for double counting correction of non-local self-energy (local, global)
 
 
     solver_options: dict = Embedding.Options.change_dict_defaults("solver_options", n_moments=(6,6), conv_tol=1e-15, conv_tol_normt=1e-15)
@@ -95,7 +95,7 @@ class REGF(REWF):
             super().kernel()
        
         with log_time(self.log.info, "Time for self-energy: %s"):   
-            self.se = self.make_self_energy(se_mode=self.opts.se_mode, hermitian_lanczos=self.opts.hermitian_lanczos, combine_sectors=self.opts.combine_sectors_in_cluster, proj=self.opts.proj, global_1dm=self.opts.global_1dm)
+            self.se = self.make_self_energy(se_mode=self.opts.se_mode, hermitian_lanczos=self.opts.hermitian_lanczos, proj=self.opts.proj)
 
         with log_time(self.log.info, "Time for Green's function: %s"):
             self.gf, self.se = self.make_greens_function(self.se, chempot_global=self.opts.chempot_global)
@@ -108,9 +108,9 @@ class REGF(REWF):
         ip = self.gf.as_perturbed_mo_energy()[self.mf.mol.nelectron//2-1]
         ea = self.gf.as_perturbed_mo_energy()[self.mf.mol.nelectron//2]
         gap = ea - ip
-        self.log.info("IP  = %8f"%ip)
-        self.log.info("EA  = %8f"%ea)
-        self.log.info("Gap = %8f"%gap)
+        self.log.info("IP  = %8f"%ip.real)
+        self.log.info("EA  = %8f"%ea.real)
+        self.log.info("Gap = %8f"%gap.real)
 
     def make_greens_function(self, se, chempot_global=None):
         """
@@ -133,13 +133,13 @@ class REGF(REWF):
            chempot_global = self.opts.chempot_global
         SC = self.get_ovlp() @ self.mo_coeff
 
-        assert isinstance(se, SE_LehmannRep) # Change to accept all SE types?
-        assert se.nsectors == 1 # Implement for separat particle hole GFs?
+        #assert isinstance(se, SE_LehmannRep) # Change to accept all SE types?
+        #assert se.nsectors == 1 # Implement for separat particle hole GFs?
 
         if se.statics.ndim == 3:
-            static_self_energy = np.sum(se.statics, axis=0)
+            static = np.sum(se.statics, axis=0)
         else:
-            static_self_energy = se.statics
+            static = se.statics
         
         if se.overlaps is not None:
             if se.overlaps.ndim == 3:
@@ -148,10 +148,37 @@ class REGF(REWF):
                 overlap = se.overlaps
         else:
             overlap = None
-        self_energy = se.lehmanns[0]
+
+
+        #assert overlap is None
+
+
+        if isinstance(se, SE_LehmannRep):
+            assert se.nsectors == 1
+            self_energy = se.lehmanns[0]
+            gf = Lehmann(*self_energy.diagonalise_matrix_with_projection(static, overlap=overlap) )
+            
+
+        elif isinstance(se, SE_MomentRep):
+            assert se.nsectors == 2
+            
+            res = []
+            for i, s in enumerate(se.moments):
+                moms = se.moments[i]
+                solver = MBLSE(static, moms, hermitian=self.opts.hermitian_lanczos)
+                solver.kernel()
+                res.append(solver.result)
+            res = dyson.Spectral.combine_for_self_energy(*res)
+            spec = dyson.Spectral.from_self_energy(static, res.get_self_energy())
+            gf = spec.get_greens_function()
+            self_energy = spec.get_self_energy()
+
+
+        else:
+            raise NotImplementedError("Green's function construction not implemented for self-energy type %s"%type(se))
     
         self.log.info("Diagonalizing arrowhead matrix to obtain Green's function")
-        gf = Lehmann(*self_energy.diagonalise_matrix_with_projection(static_self_energy, overlap=overlap) )
+        
 
         # Add fock self-consistency here?
 
@@ -162,7 +189,7 @@ class REGF(REWF):
 
 
         elif chempot_global == 'aux':
-            mu_solver = dyson.solvers.static.chempot.AuxiliaryShift(static_self_energy, self_energy, self.mf.mol.nelectron, overlap=overlap)
+            mu_solver = dyson.solvers.static.chempot.AuxiliaryShift(static, self_energy, self.mf.mol.nelectron, overlap=overlap)
             mu_solver.kernel()
             result = mu_solver.result
             gf = result.get_greens_function()
@@ -175,14 +202,12 @@ class REGF(REWF):
         return gf, self_energy
 
 
-    def make_self_energy(self, se_mode=None, se_static_mode=None, hermitian_lanczos=None, combine_sectors=False, proj=None, global_1dm=None):
+    def make_self_energy(self, se_mode=None, static_se_mode=None, hermitian_lanczos=None, proj=None):
 
         se_mode = self.opts.se_mode if se_mode is None else se_mode
-        se_static_mode = self.opts.se_static if se_static_mode is None else se_static_mode
+        static_se_mode = self.opts.static_se_mode if static_se_mode is None else static_se_mode
         hermitian_lanczos = self.opts.hermitian_lanczos if hermitian_lanczos is None else hermitian_lanczos
-        combine_sectors = self.opts.combine_sectors_in_cluster if combine_sectors is None else combine_sectors
         proj = self.opts.proj if proj is None else proj
-        global_1dm = self.opts.global_1dm if global_1dm is None else global_1dm
 
         # if self.opts.se_mode == 'lehmann' or self.opts.se_mode == 'spectral':
         #     overlap, static_self_energy, self_energy = self.make_self_energy_lehmann(self.opts.proj)
@@ -198,59 +223,48 @@ class REGF(REWF):
         #     pass
         #     #raise ValueError("Invalid self-energy mode: %s"%self.opts.se_mode)
 
+
+        # Build static self-energy
+
         dm1 = None
-        self.log.info("Calculating static self-energy with %s method."%se_static_mode)
-        if se_static_mode == 'cluster_moments':
+        self.log.info("Calculating static self-energy with %s method."%static_se_mode)
+        if static_se_mode in ['cluster_moments', 'cluster_moments_corr', 'cluster_fock_corr', 'global_fock_corr']:
             se_static = make_static_self_energy(self, 
                                                 proj=1, 
                                                 sym_moms=self.opts.sym_moms, 
-                                                with_mf=True, 
-                                                use_sym=self.opts.use_sym, 
-                                                orth_basis=self.opts.global_1dm)
+                                                static_se_mode=static_se_mode,
+                                                use_sym=self.opts.use_sym)
             
-        elif se_static_mode == 'cluster_moments_corr':
-            se_static = make_static_self_energy(self, 
-                                                proj=1, 
-                                                sym_moms=self.opts.sym_moms, 
-                                                with_mf=False, 
-                                                use_sym=self.opts.use_sym, 
-                                                orth_basis=self.opts.global_1dm)
-            
-        elif se_static_mode == 'fock':
+        elif static_se_mode == 'fock':
             se_static = np.diag(self.mf.mo_energy)
-        elif se_static_mode == 'fock_corr':
+        elif static_se_mode == 'fock_corr':
             dm1 = self._make_rdm1_ccsd_global_wf(self, slow=True, ao_basis=True) 
             fock_corr_ao = self.mf.get_fock(dm=dm1) 
             se_static = self.mo_coeff.T @ fock_corr_ao @ self.mo_coeff
-        elif se_static_mode == 'cluster_fock_corr':
-            raise NotImplementedError()
         else:
-            raise ValueError("Invalid static self-energy mode: %s"%se_static_mode)
+            raise ValueError("Invalid static self-energy mode: %s"%static_se_mode)
         
+        assert se_static.ndim == 2, "Static self-energy should be a 2D array"
+
+
         if self.opts.non_local_se is not None:
             s = "GW(TDA)" if self.opts.non_local_se == 'gw_tda' else "GW(RPA)"
-            self.log.info("Calculating dynamic self-energy with %s projectors, using %s method with non-local %s.", self.opts.proj, self.opts.se_mode, s)  
+            m = "local" if self.opts.se_dc_mode == 'local' else 'global'
+            nl = " with non-local %s self-energy using %s DC correction"%(s, m)
         else:
-            self.log.info("Calculating dynamic self-energy with %s projectors, using %s method.", self.opts.proj, self.opts.se_mode)  
+            nl = '.'
+        self.log.info("Calculating dynamic self-energy with %s projectors, using %s method%s", self.opts.proj, self.opts.se_mode, nl)  
+
         se = make_self_energy(self, 
                               se_mode=self.opts.se_mode, 
-                              combine_sectors=self.opts.combine_sectors_in_cluster, 
-                              proj=self.opts.proj, orth_basis=self.opts.global_1dm, 
+                              proj=self.opts.proj,
                               non_local_se=self.opts.non_local_se, 
                               se_dc_mode=self.opts.se_dc_mode, 
                               hermitian=self.opts.hermitian_lanczos)
         
         se._statics = se_static
 
-        if se_static_mode == 'cluster_moments_corr':
-            nocc = self.mf.mol.nelectron // 2
-            fock_mo = np.diag(self.mf.mo_energy)
 
-            if se.statics.ndim == 2:
-                se._statics += fock_mo
-            else:
-                se._statics[0][:nocc, :nocc] += fock_mo[:nocc, :nocc]
-                se._statics[1][nocc:, nocc:] += fock_mo[nocc:, nocc:]
 
 
         # TODO: Clean up what follows...
@@ -259,42 +273,18 @@ class REGF(REWF):
         self.se_orig = se
         assert se.hermitian == hermitian_lanczos, "Hermiticity of self-energy does not match specified value"
     
-        if self.opts.se_mode == 'moments' or self.opts.se_mode == 'moments_mblgf':
+        if self.opts.se_mode == 'moments' or self.opts.se_mode == 'lehmann_moments':
 
-            
-            #TODO: Refactor this into egf.make_self_energy and egf.make_static_self_energy functions
-            if self.opts.global_1dm:
-                if dm1 is None:
-                    dm1 = self._make_rdm1_ccsd_global_wf(self, slow=True) / 2
-                else:
-                    dm1 = dm1 / 2
-                eye_m_dm1 = np.eye(dm1.shape[0]) - dm1
-                self.ovlp_global_wf = np.array([dm1, eye_m_dm1])
-
-                # statics = se.statics
-                # from dyson.util.linalg import matrix_power
-                # unorth_h, _ = matrix_power(self.ovlp_global_wf[0], 0.5, hermitian=True, return_error=False)
-                # unorth_p, _ = matrix_power(self.ovlp_global_wf[1], 0.5, hermitian=True, return_error=False)
-
-                # unorth = np.array([unorth_h, unorth_p])
-                # statics = einsum('spP,sqQ,sPQ->spq', unorth,  unorth, statics)
-                # se_moms = se.moments
-                # se_moms = einsum('spP,sqQ,s...PQ->s...pq', unorth, unorth, se_moms)
-
-                se = se.unorthogonalize(overlaps=self.ovlp_global_wf)
-
-            else:
-                #se = make_self_energy(self, se_mode='moments', combine_sectors=self.opts.combine_sectors_in_cluster, proj=self.opts.proj, orth_basis=False)
-                pass
             if se.statics.ndim == 3:
                 se._statics = np.sum(se.statics, axis=0)    
-            spec = se.to_spectral().combine_sectors()
-            se = spec.to_se_lehmann()
-            se._overlaps = None
+            # spec = se.to_spectral().combine_sectors()
+            # se = spec.to_se_lehmann()
+            assert se._overlaps is None
 
         elif self.opts.se_mode == 'lehmann':
-            if not self.opts.combine_sectors_in_cluster:
-                se = se.combine_sectors()
+            if se.statics.ndim == 3:
+                se._statics = np.sum(se.statics, axis=0)   
+            se = se.combine_sectors()
             
 
         elif self.opts.se_mode == 'spectral':
