@@ -72,6 +72,27 @@ class GF_MomentRep(MomentRep, GreensFunction):
         if hermitian:
             self._moments = 0.5 * (self._moments + self._moments.conj().transpose(0,1,3,2))
 
+    def copy(self, nmom=None, hermitian=None):
+        """Create a copy of the GF_MomentRep, optionally truncating the number of moments.
+
+        TODO: Remove or perform shape checks
+
+        Parameters
+        ----------
+        nmom : int, optional
+            If specified, truncate the number of moments to nmom.
+        hermitian : bool, optional
+            If specified, indicates whether if the GF is Hermitian. Otherwise, determined automatically.
+        Returns
+        -------
+        copied_moments : GF_MomentRep
+            Copied moment representation.
+        """
+        new_moments = self.moments.copy()[:,:nmom] if nmom is not None else self.moments.copy()
+
+        hermitian = self.hermitian if hermitian is None else hermitian
+        return GF_MomentRep(self.moments, hermitian=hermitian)
+
     @property
     def moments(self):
         """Moments of the Green's function."""
@@ -286,27 +307,33 @@ class SE_MomentRep(MomentRep, SelfEnergy):
         self._hermitian = hermitian
 
 
-    # def copy(self, overlap=None, static=None):
-    #     """Create a copy of the SE_MomentRep, optionally replacing overlap or static.
+    def copy(self, nmom=None, overlap=None, static=None, hermitian=None):
+        """Create a copy of the SE_MomentRep, optionally replacing overlap or static and truncating the number of moments.
 
-    #     TODO: Remove or perform shape checks
+        TODO: Remove or perform shape checks
 
-    #     Parameters
-    #     ----------
-    #     overlap : ndarray (nphys, nphys) or (nsectors, nphys, nphys), optional
-    #         New overlap matrices for each sector.
-    #     static : ndarray (nphys, nphys) or (nsectors, nphys, nphys), optional
-    #         New static part of the self-energy.
+        Parameters
+        ----------
+        nmom : int, optional
+            If specified, truncate the number of moments to nmom.
+        overlap : ndarray (nphys, nphys) or (nsectors, nphys, nphys), optional
+            New overlap matrices for each sector.
+        static : ndarray (nphys, nphys) or (nsectors, nphys, nphys), optional
+            New static part of the self-energy.
+        hermitian : bool, optional
+            If specified, indicates whether if the SE is Hermitian. Otherwise, determined automatically.
+        Returns
+        -------
+        copied_moments : SE_MomentRep
+            Copied moment representation.
+        """
+        new_overlap = overlap if overlap is not None else self.overlaps.copy()
+        new_static = static if static is not None else self.statics.copy()
+        new_moments = self.moments.copy()[:,:nmom] if nmom is not None else self.moments.copy()
 
-    #     Returns
-    #     -------
-    #     copied_moments : SE_MomentRep
-    #         Copied moment representation.
-    #     """
-    #     new_overlap = overlap if overlap is not None else self.overlaps
-    #     new_static = static if static is not None else self.statics
-    #     hermitian = self.hermitian and np.allclose(new_static, new_static.conj().transpose(0,2,1)) and np.allclose(new_overlap, new_overlap.conj().transpose(0,2,1))            
-    #     return SE_MomentRep(new_static, self.moments, overlap=new_overlap, hermitian=hermitian)
+        if hermitian is None:
+            hermitian = self.hermitian and np.allclose(new_static, new_static.conj().transpose(0,2,1)) and np.allclose(new_overlap, new_overlap.conj().transpose(0,2,1))            
+        return SE_MomentRep(new_static, self.moments, overlap=new_overlap, hermitian=hermitian)
     
 
     

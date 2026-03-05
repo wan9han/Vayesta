@@ -153,6 +153,7 @@ def make_self_energy(
         project_before=False,
         non_local_se = None, 
         se_dc_mode = 'global', 
+        nmom = None,
         ):
 
     """
@@ -199,6 +200,7 @@ def make_self_energy(
     
     hermitian = emb.opts.hermitian_lanczos if hermitian is None else hermitian
 
+    # Compute full system non-local self-energy 
     if non_local_se is not None:
         if non_local_se.lower() == 'gw_rpa':
             polarizability = 'drpa'
@@ -217,17 +219,16 @@ def make_self_energy(
         cfc = fc.T @ fc
         
         # Get cluster self-energy and Green's function
-        
         gf, se = None, None
         if f.results.gf is not None:
             using_gf = True
-            gf = f.results.gf
+            gf = f.results.gf.copy(nmom=nmom)
             #se = f.results.gf.to_se_moments(orth_basis=False)
             nmom_gf = gf.nmom
             nmom_se = nmom_gf - 2
         elif f.results.se is not None:
             using_gf = False
-            se = f.results.se
+            se = f.results.se.copy(nmom=nmom)
             #gf = f.results.se.to_gf_moments()
             nmom_se = se.nmom
             nmom_gf = nmom_se + 2
@@ -244,8 +245,8 @@ def make_self_energy(
             se_dc = None
 
         if hermitian:
-            se = se.hermitize()
-            gf = gf.hermitize()
+            se = se.hermitize() if se is not None else None
+            gf = gf.hermitize() if gf is not None else None
             # hermitize se_dc for CCSD?
 
         if project_before:
@@ -293,8 +294,12 @@ def make_self_energy(
         else:
             pse = se
 
+        #TMP
+        f._pse = pse
+
         #assert pse.hermitian == hermitian, "Hermiticity of projected self-energy does not match specified value"
 
+        # Rotate cluster self-energies into global MO basis
         ses_mo.append(pse.rotate(mc))
         if use_sym:
             for child in f.get_symmetry_children():
@@ -302,21 +307,22 @@ def make_self_energy(
                 ses_mo.append(pse.rotate(mc_child))
 
 
+    # Combine cluster self-energy contributions
     #se = reduce(type(se).combine, ses_mo)
     se = type(se).combine(*ses_mo)
+
+
 
     if se_mode == 'lehmann':
         se = se.remove_degeneracies(etol=emb.opts.se_eval_tol, dtol=emb.opts.se_degen_tol)
     elif se_mode == 'lehmann_moments':
         se = se.to_moments(split=True, nmom=nmom_se)
 
-
+    # Add non-local self-energy moments to cluster self-energy moments
     if non_local_se is not None:
         se._moments += se_nl._moments[:,:se.nmom]
     #assert se.hermitian == hermitian, "Hermiticity of combined self-energy does not match specified value"
-    #se._static = np.diag(emb.mf.mo_energy)
     return se
-
 
 
 def make_fragment_double_counting_correction(

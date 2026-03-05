@@ -4,6 +4,7 @@ from multiprocessing import Value
 
 # --- External
 import numpy as np
+from pyscf.data.nist import HARTREE2EV
 from vayesta.core.util import (
     NotCalculatedError,
     break_into_lines,
@@ -37,7 +38,7 @@ from dyson.util.moments import se_moments_to_gf_moments, gf_moments_to_se_moment
 class Options(REWF.Options):
     """Options for EGF calculations."""
     proj: int = 1     # Number of projectors used on self-energy (1, 2)
-    proj_static_se: int = None # Number of projectors used on static self-energy (same as proj if None)
+    proj_static_se: int = 1 # Number of projectors used on static self-energy (same as proj if None)
     use_sym: bool = True # Use symmetry for self-energy reconstruction
 
     
@@ -105,12 +106,12 @@ class REGF(REWF):
 
         #ea = self.gf.physical().virtual().energies[0] 
         #ip = self.gf.physical().occupied().energies[-1]
-        ip = self.gf.as_perturbed_mo_energy()[self.mf.mol.nelectron//2-1]
-        ea = self.gf.as_perturbed_mo_energy()[self.mf.mol.nelectron//2]
+        ip = self.gf.as_perturbed_mo_energy()[self.mf.mol.nelectron//2-1] * HARTREE2EV
+        ea = self.gf.as_perturbed_mo_energy()[self.mf.mol.nelectron//2] * HARTREE2EV
         gap = ea - ip
-        self.log.info("IP  = %8f"%ip.real)
-        self.log.info("EA  = %8f"%ea.real)
-        self.log.info("Gap = %8f"%gap.real)
+        self.log.info("IP  = %8f eV"%ip.real)
+        self.log.info("EA  = %8f eV"%ea.real)
+        self.log.info("Gap = %8f eV"%gap.real)
 
     def make_greens_function(self, se, chempot_global=None):
         """
@@ -156,12 +157,13 @@ class REGF(REWF):
         if isinstance(se, SE_LehmannRep):
             assert se.nsectors == 1
             self_energy = se.lehmanns[0]
+            print("SE Lehmann couplings: %s"%str(se.couplings.shape))
             gf = Lehmann(*self_energy.diagonalise_matrix_with_projection(static, overlap=overlap) )
             
 
         elif isinstance(se, SE_MomentRep):
             assert se.nsectors == 2
-            
+            print("SE moms shape: %s"%(str(se.moments.shape)))
             res = []
             for i, s in enumerate(se.moments):
                 moms = se.moments[i]
@@ -202,12 +204,13 @@ class REGF(REWF):
         return gf, self_energy
 
 
-    def make_self_energy(self, se_mode=None, static_se_mode=None, hermitian_lanczos=None, proj=None):
+    def make_self_energy(self, se_mode=None, static_se_mode=None, hermitian_lanczos=None, proj=None, proj_static_se=None):
 
         se_mode = self.opts.se_mode if se_mode is None else se_mode
         static_se_mode = self.opts.static_se_mode if static_se_mode is None else static_se_mode
         hermitian_lanczos = self.opts.hermitian_lanczos if hermitian_lanczos is None else hermitian_lanczos
         proj = self.opts.proj if proj is None else proj
+        proj_static_se = self.opts.proj_static_se if proj_static_se is None else proj_static_se
 
         # if self.opts.se_mode == 'lehmann' or self.opts.se_mode == 'spectral':
         #     overlap, static_self_energy, self_energy = self.make_self_energy_lehmann(self.opts.proj)
@@ -230,7 +233,7 @@ class REGF(REWF):
         self.log.info("Calculating static self-energy with %s method."%static_se_mode)
         if static_se_mode in ['cluster_moments', 'cluster_moments_corr', 'cluster_fock_corr', 'global_fock_corr']:
             se_static = make_static_self_energy(self, 
-                                                proj=1, 
+                                                proj=proj_static_se, 
                                                 sym_moms=self.opts.sym_moms, 
                                                 static_se_mode=static_se_mode,
                                                 use_sym=self.opts.use_sym)
@@ -238,7 +241,7 @@ class REGF(REWF):
         elif static_se_mode == 'fock':
             se_static = np.diag(self.mf.mo_energy)
         elif static_se_mode == 'fock_corr':
-            dm1 = self._make_rdm1_ccsd_global_wf(self, slow=True, ao_basis=True) 
+            dm1 = self._make_rdm1_ccsd_global_wf(self, slow=True, ao_basis=True) if dm1 is not None else dm1
             fock_corr_ao = self.mf.get_fock(dm=dm1) 
             se_static = self.mo_coeff.T @ fock_corr_ao @ self.mo_coeff
         else:
@@ -249,7 +252,7 @@ class REGF(REWF):
 
         if self.opts.non_local_se is not None:
             s = "GW(TDA)" if self.opts.non_local_se == 'gw_tda' else "GW(RPA)"
-            m = "local" if self.opts.se_dc_mode == 'local' else 'global'
+            m = "cluster" if self.opts.se_dc_mode == 'cluster' else 'global'
             nl = " with non-local %s self-energy using %s DC correction"%(s, m)
         else:
             nl = '.'
@@ -263,9 +266,6 @@ class REGF(REWF):
                               hermitian=self.opts.hermitian_lanczos)
         
         se._statics = se_static
-
-
-
 
         # TODO: Clean up what follows...
             
