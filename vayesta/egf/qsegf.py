@@ -5,7 +5,6 @@ import scipy.linalg
 import pyscf.scf
 
 from vayesta.core.scmf.scmf import SCMF
-from vayesta.core.foldscf import FoldedSCF
 from vayesta.lattmod import LatticeRHF
 
 from dyson import Lehmann, AufbauPrinciple
