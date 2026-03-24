@@ -101,14 +101,14 @@ class QSEGF_RHF(SCMF):
         """
 
         if self.global_static_potential:
-            self.static_potential = self.emb.mo_coeff @ self.emb.self_energy.as_static_potential(self.emb.mf.mo_energy, eta=self.eta)  @ self.emb.mo_coeff.T
+            self.static_potential = self.emb.mo_coeff @ self.emb.se.as_static_potential(self.emb.mf.mo_energy, eta=self.eta)  @ self.emb.mo_coeff.T
         else:
             raise NotImplementedError()
         
         v_old = self.static_potential.copy()
         sc = self.emb.mf.get_ovlp() @ self.emb.mo_coeff
         if self.global_static_potential:
-            self.static_potential = self.emb.mo_coeff @ self.emb.self_energy.as_static_potential(self.emb.mf.mo_energy, eta=self.eta)  @ self.emb.mo_coeff.T
+            self.static_potential = self.emb.mo_coeff @ self.emb.se.as_static_potential(self.emb.mf.mo_energy, eta=self.eta)  @ self.emb.mo_coeff.T
         self.static_potential = self.emb.mf.get_ovlp() @ self.static_potential @ self.emb.mf.get_ovlp()
         if diis is not None:
             self.static_potential = diis.update(self.static_potential)
@@ -146,7 +146,7 @@ class QSEGF_RHF(SCMF):
             self.dynamic_gap_hist.append(dynamic_gap)
             self.mo_coeff_hist.append(mo_coeff.copy())
             self.gf_hist.append(self.gf.copy())
-            self.se_hist.append(self.emb.self_energy.copy())
+            self.se_hist.append(self.emb.se.copy())
 
         return mo_coeff
 

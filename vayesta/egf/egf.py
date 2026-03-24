@@ -96,10 +96,10 @@ class REGF(REWF):
             super().kernel()
        
         with log_time(self.log.info, "Time for self-energy: %s"):   
-            self.se = self.make_self_energy(se_mode=self.opts.se_mode, hermitian_lanczos=self.opts.hermitian_lanczos, proj=self.opts.proj)
+            self.se_rep = self.make_self_energy(se_mode=self.opts.se_mode, hermitian_lanczos=self.opts.hermitian_lanczos, proj=self.opts.proj)
 
         with log_time(self.log.info, "Time for Green's function: %s"):
-            self.gf, self.se = self.make_greens_function(self.se, chempot_global=self.opts.chempot_global)
+            self.gf, self.se = self.make_greens_function(self.se_rep, chempot_global=self.opts.chempot_global)
         
         #gm_energy = self.galitskii_migdal(self.gf, self.se)
         #self.log.info("Galitskii-Migdal energy: %s", energy_string(gm_energy))
