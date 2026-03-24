@@ -157,7 +157,7 @@ class REGF(REWF):
 
         elif isinstance(se, SE_MomentRep):
             assert se.nsectors == 2
-            self.log.info("Running MBLSE with %d (hole/particle) moments"%(se.moments.shape[1]))
+            self.log.info("Running MBLSE with %d (hole/particle) self-energy moments"%(se.moments.shape[1]))
             res = []
             for i, s in enumerate(se.moments):
                 moms = se.moments[i]
