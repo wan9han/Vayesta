@@ -166,6 +166,15 @@ class SpectralRep(Dynamical):
     def to_se_moments(self, nmom=None, split=True, chempot=None):
         """Convert to self-energy moments representation.
         
+        Parameters
+        ----------
+        nmom : int (optional)
+            Number of moments to compute. If None, it will be determined automatically.
+        split : bool (optional)
+            If True, split the self-energy moments into particle and hole parts. Only implemented for single sector spectral representations.
+        chempot : float (optional)
+            Chemical potential to use for splitting the self-energy moments. If None, it will be taken from the spectral representation. Only used if split=True.
+
         Returns
         -------
         SE_MomentRep

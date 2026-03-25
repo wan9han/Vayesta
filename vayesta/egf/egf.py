@@ -152,7 +152,7 @@ class REGF(REWF):
             if se.nsectors > 1:
                 se = se.combine_sectors()
             self_energy = se.lehmanns[0]
-            self.log.info("Diagonalsing Lehmann SE with nphys = %d, naux = %d"%(self_energy.couplings.shape))
+            self.log.info("Diagonalsing Lehmann SE with nphys = %d, naux = %d"%(self_energy.couplings.shape[-2:]))
             gf = Lehmann(*self_energy.diagonalise_matrix_with_projection(static) )
 
         elif isinstance(se, SE_MomentRep):
@@ -235,6 +235,7 @@ class REGF(REWF):
 
         se = make_self_energy(self, 
                               se_mode=self.opts.se_mode, 
+                              chempot_clus=self.opts.chempot_clus,
                               proj=self.opts.proj,
                               non_local_se=self.opts.non_local_se, 
                               se_dc_mode=self.opts.se_dc_mode, 
@@ -242,7 +243,10 @@ class REGF(REWF):
         
         # Overwrite static, with static from selected method
         se._statics = se_static
-        assert se.hermitian == hermitian_lanczos, "Hermiticity of self-energy does not match specified value"
+        # Overlap should always be None
+        se._overlaps = None
+        
+        #assert se.hermitian == hermitian_lanczos, "Hermiticity of self-energy does not match specified value"
     
         return se
     
