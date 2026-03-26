@@ -166,7 +166,7 @@ class REGF(REWF):
                 res.append(solver.result)
             res = dyson.Spectral.combine_for_self_energy(*res)
             self_energy = res.get_self_energy()
-            self.log.info("Diagonalsing Lehmann SE with nphys = %d, naux = %d"%(self_energy.couplings.shape))
+            self.log.info("Diagonalsing Lehmann SE with shape %s"%str(self_energy.couplings.shape))
             spec = dyson.Spectral.from_self_energy(static, self_energy)
             gf = spec.get_greens_function()
             self_energy = spec.get_self_energy()
