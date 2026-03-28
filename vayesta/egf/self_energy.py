@@ -5,7 +5,7 @@ import scipy
 
 from functools import reduce
 
-from vayesta.core.util import NotCalculatedError, Object, dot, einsum
+from vayesta.core.util import NotCalculatedError, ImaginaryPartError, Object, dot, einsum
 from vayesta.core.types import SE_MomentRep
 try:
     import dyson
@@ -25,6 +25,7 @@ def make_static_self_energy(
         sym_moms=False, 
         static_se_mode ='cluster_moments_corr', 
         use_sym=True, 
+        basis = 'mo',
         ):
     """
     Construct global static self-energy equal to the first Green's function moment.
@@ -48,19 +49,35 @@ def make_static_self_energy(
         Static part of self-energy (MO basis)   
     """
 
+    if basis not in ['mo', 'kmo']:
+        raise NotImplementedError("Only MO and k-MO basis implemented for static self-energy construction")
+
     if static_se_mode not in ['cluster_moments', 'cluster_moments_corr', 'cluster_fock_corr', 'global_fock_corr']:
         raise ValueError("Invalid method for static self-energy construction: %s"%static_se_mode)
     
     fock = emb.get_fock()
-    static_self_energy = np.zeros(fock.shape, dtype=fock.dtype)
+    nmo = fock.shape[0]
+
+    if basis == 'mo':
+        static_self_energy = np.zeros(fock.shape, dtype=fock.dtype)
+        if static_se_mode in ['cluster_moments_corr']:
+            global_fock = emb.get_fock()
+        elif static_se_mode in ['cluster_fock_corr', 'global_fock_corr']:
+            dm1 = emb._make_rdm1_ccsd_global_wf(emb, ao_basis=True)
+            global_fock = emb.mf.get_fock(dm=dm1) 
+
+    elif basis == 'kmo':#
+        nkpts, nkao, nkmo = emb.kmo_coeff.shape
+        static_self_energy = np.zeros((nkpts, nkmo, nkmo), dtype=np.complex128)  
+        if static_se_mode in ['cluster_moments_corr']:
+            global_fock = emb.mf.get_kfock()
+        elif static_se_mode in ['cluster_fock_corr', 'global_fock_corr']:
+            dm1 = emb._make_rdm1_ccsd_global_wf(emb, ao_basis=True)
+            dm1k = emb.mf.one_body_ao_to_kao(dm1)
+            global_fock = emb.mf.get_kfock(dm=dm1k) 
             
 
-    if static_se_mode in ['cluster_moments_corr']:
-        global_fock = emb.get_fock()
-    elif static_se_mode in ['cluster_fock_corr', 'global_fock_corr']:
-        dm1 = emb._make_rdm1_ccsd_global_wf(emb, ao_basis=True)
-        global_fock = emb.mf.get_fock(dm=dm1) 
-
+    
     fragments = emb.get_fragments(sym_parent=None) if use_sym else emb.get_fragments()
     for i, f in enumerate(fragments):
 
@@ -69,6 +86,10 @@ def make_static_self_energy(
         fc = f.get_overlap('frag|cluster')
         cfc = fc.T @ fc
 
+        kmo2clus = f.get_overlap('kmo|cluster') if basis == 'kmo' else None
+        kao2clus = f.get_overlap('kao|cluster') if basis == 'kmo' else None
+        
+
         if f.results.gf is not None:
             gf = f.results.gf
 
@@ -76,66 +97,71 @@ def make_static_self_energy(
             gf = f.results.se.to_gf_moments()
         else:
             raise Exception("Cluster has no Green's function or self-energy")
+        
+        # Static self-energy is the sum of first hole and particle moments
         static = gf.moments[:,1].copy()
-        overlap = gf.moments[:,0].copy()
         static = np.sum(static, axis=0)
 
         if static_se_mode in ['cluster_moments_corr', 'cluster_fock_corr', 'global_fock_corr']:
 
-            if static_se_mode == 'cluster_moments_corr':
-                fock_cls = f.cluster.c_active.T @ global_fock @ f.cluster.c_active
-            elif static_se_mode == 'global_fock_corr':
-                fock_cls = f.cluster.c_active.T @ global_fock @ f.cluster.c_active
+            if basis == 'mo':
+                proj_to_cluster = lambda mat: f.cluster.c_active.T @ mat @ f.cluster.c_active
+            elif basis == 'kmo':
+                proj_to_cluster = lambda mat: einsum('kap,kab,kbq->pq', kao2clus.conj(), mat, kao2clus)
+
+            if static_se_mode in ['cluster_moments_corr', 'global_fock_corr']:
+                fock_cls = proj_to_cluster(global_fock)
             elif static_se_mode == 'cluster_fock_corr':
                 dm1 = 2*gf.moments[0,0] # Zeroth hole moment of GF gives the 1-RDM
                 mf_cls = f.hamil.to_pyscf_mf(allow_df=True)[0]                
                 fock_cls = mf_cls.get_fock(dm=dm1)
 
-            else:
-                raise ValueError("Invalid method for static self-energy double counting correction")
-            #print(np.diag(fock_cls))
-            nocc = f.cluster.nocc
 
-            if static.ndim == 2:
-                static -= fock_cls
-            elif static.ndim == 3:
-                raise RuntimeError("Static self-energy should be summed over sectors")
-                fock_oo = np.zeros_like(fock_cls)
-                fock_oo[:nocc, :nocc] = fock_cls[:nocc, :nocc]
-                static[0] -= fock_oo
-                
-                fock_vv = np.zeros_like(fock_cls)
-                fock_vv[nocc:, nocc:] = fock_cls[nocc:, nocc:]
-                static[1] -= fock_vv
-            else:
-                raise ValueError("Invalid shape for static self-energy")
-
+            if np.linalg.norm(fock_cls.imag) > 1e-6:
+                raise ImaginaryPartError("Imaginary part of Fock matrix correction is larger than 1e-6, check for convergence issues in CCSD calculation")
+            static -= fock_cls.real
+            
         if proj == 1:
             static_frag = cfc @ static
             static_frag = 0.5 * (cfc @ static + static @ cfc)
-            static_self_energy += mc @ static_frag @ mc.T
+            
+            if basis == 'mo':
+                static_self_energy += mc @ static_frag @ mc.T
+                if use_sym:
+                    for child in f.get_symmetry_children():
+                        mc_child = child.get_overlap('mo|cluster')
+                        static_self_energy += mc_child @ static_frag @ mc_child.T 
 
-            if use_sym:
-                for child in f.get_symmetry_children():
-                    mc_child = child.get_overlap('mo|cluster')
-                    static_self_energy += mc_child @ static_frag @ mc_child.T 
+            elif basis == 'kmo':
+                for k in range(nkpts):
+                    fac = nkpts if use_sym else 1
+                    static_self_energy[k] += fac * kmo2clus[k] @ static_frag @ kmo2clus[k].T.conj()
 
         elif proj == 2:
             static_frag = fc @ static @ fc.T
-            static_self_energy += mf @ static_frag @ mf.T
 
-            if use_sym:
-                for child in f.get_symmetry_children():
-                    mf_child = child.get_overlap('mo|frag')
-                    static_self_energy += mf_child @ static_frag @ mf_child.T
+            if basis == 'mo':
+                static_self_energy += mf @ static_frag @ mf.T
 
-    if static_se_mode in ['cluster_moments_corr', 'cluster_fock_corr', 'global_fock_corr']:        
-        if static_self_energy.ndim == 2:
+                if use_sym:
+                    for child in f.get_symmetry_children():
+                        mf_child = child.get_overlap('mo|frag')
+                        static_self_energy += mf_child @ static_frag @ mf_child.T
+
+            elif basis == 'kmo':
+                kmo_frag = f.get_overlap('kmo|frag')
+                for k in range(nkpts):
+                    fac = nkpts if use_sym else 1
+                    static_self_energy[k] += fac * kmo_frag[k] @ static_frag @ kmo_frag[k].T.conj()
+
+
+    if static_se_mode in ['cluster_moments_corr', 'cluster_fock_corr', 'global_fock_corr']:       
+
+        if basis == 'mo':         
             static_self_energy += emb.mo_coeff.T @ global_fock @ emb.mo_coeff
-        else:
-            raise RuntimeError("Static self-energy should be summed over sectors")
-            static[0][:nocc, :nocc] += fock_mo[:nocc, :nocc]
-            static[1][nocc:, nocc:] += fock_mo[nocc:, nocc:]
+        elif basis == 'kmo':
+            for k in range(nkpts):
+                static_self_energy[k] += emb.mf.kmo_coeff[k].T.conj() @ global_fock[k] @ emb.mf.kmo_coeff[k]
 
     if sym_moms:
         static_self_energy = 0.5 * (static_self_energy + static_self_energy.swapaxes(-1, -2).conj())
@@ -154,6 +180,7 @@ def make_self_energy(
         non_local_se = None, 
         se_dc_mode = 'global', 
         nmom = None,
+        basis = 'mo',
         ):
 
     """
@@ -198,6 +225,9 @@ def make_self_energy(
     if se_mode not in ['moments', 'lehmann_moments'] and non_local_se is not None:
         raise NotImplementedError("Double counting correction only implemented for moment-based self-energy construction")
     
+    if basis not in ['mo', 'kmo']:
+        raise NotImplementedError("Only MO and k-MO basis implemented for self-energy construction")
+
     hermitian = emb.opts.hermitian_lanczos if hermitian is None else hermitian
 
     # Compute full system non-local self-energy 
@@ -209,14 +239,28 @@ def make_self_energy(
         nmom_se = emb.fragments[0].results.gf.nmom - 1
         se_nl = calc_gw_self_energy_moments(emb.mf, nmom_se=nmom_se, polarizability=polarizability)
 
+
+    if basis == 'mo':
+        ses_mo = []
+    elif basis == 'kmo':
+
+        if se_mode not in ['moments']:
+            raise NotImplementedError("k-MO basis currently only implemented for moment-based self-energy construction")
+        if non_local_se is not None:
+            raise NotImplementedError("Non-local self-energy from GW not implemented for k-MO basis")
+
+        nkpts, nkao, nkmo = emb.kmo_coeff.shape
+        ses_mo = [[] for _ in range(nkpts)]
+
     fragments = emb.get_fragments(sym_parent=None) if use_sym else emb.get_fragments()
-    ses_mo = []
     for i, f in enumerate(fragments):
         
         mc = f.get_overlap('mo|cluster')
         mf = f.get_overlap('mo|frag')
         fc = f.get_overlap('frag|cluster')
         cfc = fc.T @ fc
+
+        kmo2clus = f.get_overlap('kmo|cluster') if basis == 'kmo' else None
         
         # Get cluster self-energy and Green's function
         gf, se = None, None
@@ -300,18 +344,29 @@ def make_self_energy(
         #assert pse.hermitian == hermitian, "Hermiticity of projected self-energy does not match specified value"
 
         # Rotate cluster self-energies into global MO basis
-        ses_mo.append(pse.rotate(mc))
-        if use_sym:
-            for child in f.get_symmetry_children():
-                mc_child = child.get_overlap('mo|cluster')
-                ses_mo.append(pse.rotate(mc_child))
+
+        if basis == 'mo':
+            ses_mo.append(pse.rotate(mc))
+            if use_sym:
+                for child in f.get_symmetry_children():
+                    mc_child = child.get_overlap('mo|cluster')
+                    ses_mo.append(pse.rotate(mc_child))
+        elif basis == 'kmo':
+            for k in range(nkpts):
+                fac = np.sqrt(nkpts) if use_sym else 1
+                ses_mo[k].append(pse.rotate(kmo2clus[k] * fac))
 
 
     # Combine cluster self-energy contributions
     #se = reduce(type(se).combine, ses_mo)
-    se = type(se).combine(*ses_mo)
 
-
+    if basis == 'mo':
+        se = type(se).combine(*ses_mo)
+    elif basis == 'kmo':
+        se = []
+        for k in range(nkpts):
+            se_k = type(pse).combine(*ses_mo[k])
+            se.append(se_k)
 
     if se_mode == 'lehmann':
         se = se.remove_degeneracies(etol=emb.opts.se_eval_tol, dtol=emb.opts.se_degen_tol)

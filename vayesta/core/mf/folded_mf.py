@@ -160,6 +160,9 @@ class Folded_PySCF_MeanField(PySCF_MeanField):
             return veff - kv_exxdiv
         else:
             return veff
+        
+    def get_kfock(self, dm=None, with_exxdiv=True):
+        return self.get_khcore() + self.get_kveff(dm=dm, with_exxdiv=with_exxdiv)
 
         
     def make_rdm1(self, mo_coeff=None, mo_occ=None):
