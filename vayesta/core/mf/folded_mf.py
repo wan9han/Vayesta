@@ -45,6 +45,15 @@ class Folded_PySCF_MeanField(PySCF_MeanField):
         self.cell = mf.cell
         self.kpts = mf.kpts
 
+        self._kmo_coeff = np.array(mf.mo_coeff).copy()
+        self._kmo_occ = np.array(mf.mo_occ).copy()
+        self._kmo_energy = np.array(mf.mo_energy).copy()
+
+        self._kovlp = mf.get_ovlp()
+        self._khcore = mf.get_hcore()
+        self._kveff = mf.get_veff()
+
+
         # Only Gamma point supported for now
         self.kpt = np.array([0.0, 0.0, 0.0])
 
@@ -96,23 +105,23 @@ class Folded_PySCF_MeanField(PySCF_MeanField):
 
     @property
     def kmo_coeff(self):
-        return np.array(self.mf.mo_coeff)
+        return self._kmo_coeff
     
     @property
     def kmo_energy(self):
-        return np.array(self.mf.mo_energy)
-
+        return self._kmo_energy
+    
     @property
     def kmo_occ(self):
-        return np.array(self.mf.mo_occ)
+        return self._kmo_occ
     
-    def get_ovlp(self, *args, **kwargs):
-        sk = self.mf.get_ovlp(*args, **kwargs)
+    def get_ovlp(self):
+        sk = self._kovlp
         ovlp = k2bvk_2d(sk, self.kphase)
         return ovlp
 
-    def get_kovlp(self, *args, **kwargs):
-        return self.mf.get_ovlp(*args, **kwargs)
+    def get_kovlp(self):
+        return self._kovlp
 
     def get_ovlp_power(self, power):
         if power == 0:
@@ -126,20 +135,24 @@ class Folded_PySCF_MeanField(PySCF_MeanField):
         spow = pyscf.pbc.tools.k2gamma.to_supercell_ao_integrals(self.kcell, self.kpts, spowk)
         return spow
 
-    def get_hcore(self, *args, make_real=True, **kwargs):
-        hk = self.mf.get_hcore(*args, **kwargs)
+    def get_hcore(self, make_real=True):
+        hk = self._khcore
         hcore = k2bvk_2d(hk, self.kphase, make_real=make_real)
         return hcore
 
     def get_khcore(self, *args, **kwargs):
-        return self.mf.get_hcore(*args, **kwargs)
+        return self._khcore
 
-    def get_veff(self, mol=None, dm=None, *args, make_real=True, with_exxdiv=True, **kwargs):
-        assert mol is None or mol is self.mol
+    def get_veff(self, dm=None, make_real=True, with_exxdiv=True):
         # Unfold DM into k-space
         if dm is not None:
-            dm = bvk2k_2d(dm, self.kphase)
-        vk = self.mf.get_veff(self.mf.mol, dm, *args, **kwargs)
+            dm = np.array(dm)
+            if dm.ndim == 2:
+                dm = bvk2k_2d(dm, self.kphase)
+            vk = self.mf.get_veff(dm_kpts=dm)
+        else:
+            vk = self._kveff
+        
         veff = k2bvk_2d(vk, self.kphase, make_real=make_real)
 
         if not with_exxdiv and self.has_exxdiv:
@@ -148,10 +161,14 @@ class Folded_PySCF_MeanField(PySCF_MeanField):
         else:
             return veff
 
-    def get_kveff(self, mol=None, dm=None, *args, with_exxdiv=True, **kwargs):
-        if dm is not None and dm.ndim == 2:
-            dm = bvk2k_2d(dm, self.kphase)
-        veff = self.mf.get_veff(self.mf.mol, dm, *args, **kwargs)
+    def get_kveff(self, dm=None, with_exxdiv=True):
+        if dm is not None:
+            if dm.ndim == 2:
+                dm = bvk2k_2d(dm, self.kphase)
+            veffk = self.mf.get_veff(dm_kpts=dm)
+        else:   
+            veffk = self._kveff
+        
 
         if not with_exxdiv and self.has_exxdiv:
             raise NotImplementedError("get_kveff with with_exxdiv=False is not implemented yet")
@@ -159,21 +176,35 @@ class Folded_PySCF_MeanField(PySCF_MeanField):
             kv_exxdiv = bvk2k_2d(v_exxdiv, self.kphase)
             return veff - kv_exxdiv
         else:
-            return veff
+            return veffk
+        
+    def get_kfock(self, dm=None, with_exxdiv=True):
+        return self.get_khcore() + self.get_kveff(dm=dm, with_exxdiv=with_exxdiv)
 
         
     def make_rdm1(self, mo_coeff=None, mo_occ=None):
-        """Make 1-particle density matrix in AO basis."""
-        if mo_coeff is None:
-            mo_coeff = self.mo_coeff
-        if mo_occ is None:
-            mo_occ = self.mo_occ
-        dm1 = self._dummy_mf.make_rdm1(mo_coeff=mo_coeff, mo_occ=mo_occ)
-        #dm1 = np.einsum("...ap,...o,...bp->ab", mo_coeff, mo_occ, mo_coeff.conj())
+        """Make 1-particle density matrix in AO basis or k-AO basis."""
+
+        if np.array(mo_coeff).ndim == 2 or mo_coeff is None:
+            if mo_coeff is None:
+                mo_coeff = self.mo_coeff
+            if mo_occ is None:
+                mo_occ = self.mo_occ
+            dm1 = self._dummy_mf.make_rdm1(mo_coeff=mo_coeff, mo_occ=mo_occ)
+            #dm1 = np.einsum("...ap,...o,...bp->ab", mo_coeff, mo_occ, mo_coeff.conj())
+        
+        elif np.array(mo_coeff).ndim == 3:
+            if mo_coeff is None:
+                mo_coeff = self.kmo_coeff
+            if mo_occ is None:
+                mo_occ = self.kmo_occ
+            dm1 = self.mf.make_rdm1(mo_coeff=mo_coeff, mo_occ=mo_occ)
+            #dm1 = np.einsum("...kap,...o,...kbp->kab", mo_coeff, mo_occ, mo_coeff.conj())
+        
+        else:
+            raise ValueError("Invalid shape for mo_coeff: expected 2 or 3 dimensions, got %d" % np.array(mo_coeff).ndim)
         return dm1
-
-    #def make_krdm1(self, mo_coeff=None, mo_occ=None):
-
+    
     def energy_tot(self, *args, **kwargs):
         self._dummy_mf.mo_coeff = self.mo_coeff
         self._dummy_mf.mo_occ = self.mo_occ
@@ -214,13 +245,74 @@ class Folded_PySCF_RHF(Folded_PySCF_MeanField, PySCF_RHF):
             self.mf.mo_energy, self.mf.mo_coeff, self.mf.mo_occ, self.kphase, ovlp
         )
         self._dummy_mf = pyscf.scf.rhf.RHF(self.mol)
+        if hasattr(self.kcell, "nsite"):
+            self._dummy_mf.energy_nuc = lambda *args, **kwargs: 0.0
         assert np.all(self.mo_coeff.imag == 0)
 
     def orbital_ao_to_kao(self, coeff_ao):
         return unfold_orbitals(coeff_ao, self.kphase)
 
     def update_mf(self, mo_coeff, mo_energy=None, veff=None):
-        raise NotImplementedError("update_mf is not implemented for Folded_PySCF_RHF")
+        """Update underlying mean-field object."""
+
+        if np.array(mo_coeff).ndim == 2:
+
+            # Update with supercell quantities
+
+            # Chech orthonormal MOs
+            if not np.allclose(dot(mo_coeff.T, self.get_ovlp(), mo_coeff) - np.eye(mo_coeff.shape[-1]), 0):
+                raise ValueError("MO coefficients not orthonormal!")
+            self._mo_coeff = mo_coeff
+
+            #update kmo_coeff
+            self._kmo_coeff = self.orbital_ao_to_kao(mo_coeff)
+
+            dm = self.make_rdm1(mo_coeff=mo_coeff)
+            if veff is None:
+                veff = self.get_kveff(dm=dm)
+                veff = k2bvk_2d(veff, self.kphase)
+            self._kveff = veff
+
+            if mo_energy is None:
+                mo_energy = einsum('ai,ab,bi->i', mo_coeff, self.get_fock(), mo_coeff)
+            self._mo_energy = mo_energy
+            #self.e_tot = self._dummy_mf.energy_tot(dm=dm, veff=veff)
+
+        elif np.array(mo_coeff).ndim == 3:
+            
+            # Update with k-point sampled quantities
+
+            nk, nkao, nmo = mo_coeff.shape
+            assert nk == self.nkpts
+            assert nkao == self.nkao
+
+            # Check orthonormal k-MOs
+            mo_ovlp = einsum('kap,kab,kbq->kpq', mo_coeff.conj(), self.get_kovlp(), mo_coeff)
+            eye = np.array([np.eye(nmo) for k in range(nk)])
+            if not np.allclose(mo_ovlp, eye):
+                raise ValueError("k-MO coefficients not orthonormal!")
+            
+            
+            self._kmo_coeff = mo_coeff
+            dm = self.make_rdm1(mo_coeff=mo_coeff)
+            if veff is None:
+                veff = self.get_kveff(dm=dm)
+            self._kveff = veff
+            if mo_energy is None:
+                mo_energy = einsum('kap,kab,kbp->kp', mo_coeff.conj(), self.get_kfock(dm=dm), mo_coeff)
+            self._kmo_energy = mo_energy
+
+            self._mo_energy, self._mo_coeff, self._mo_occ = fold_mos(
+                    self.mf.mo_energy, self.mf.mo_coeff, self.mf.mo_occ, self.kphase, self.get_ovlp()
+                )
+            
+            self._mo_energy = mo_energy
+        
+            
+        #self.mf.get_fock(dm=dmk, veff=veff)
+
+        
+
 
 
 class Folded_PySCF_UHF(Folded_PySCF_MeanField, PySCF_UHF):
@@ -236,6 +328,8 @@ class Folded_PySCF_UHF(Folded_PySCF_MeanField, PySCF_UHF):
         )
 
         self._dummy_mf = pyscf.scf.uhf.UHF(self.mol)
+        if hasattr(self.kcell, "nsite"):
+            self._dummy_mf.energy_nuc = lambda *args, **kwargs: 0.0
         assert np.all(self.mo_coeff[0].imag == 0)
         assert np.all(self.mo_coeff[1].imag == 0)
 
@@ -366,6 +460,15 @@ def get_phase(cell, kpts, kmesh=None):
     nr = len(r_vec_abs)
     phase = np.exp(1j * np.dot(kpts, r_vec_abs.T)) / np.sqrt(nr)
     scell = tools.super_cell(cell, kmesh)
+    
+    # Lattice model specific code:
+    if hasattr(cell, "nsite") and (scell.nao_nr() != cell.nao_nr() * nr):
+        scell = copy.copy(cell)
+        scell.nsite = int(cell.nsite * nr)
+        scell.nelectron = int(cell.nelectron * nr)
+        scell.spin = int(cell.spin * nr)
+        if hasattr(scell, "_basis"):
+            scell._basis = {scell.atom_symbol(i): None for i in range(scell.nsite)}
     return scell, phase
 
 
