@@ -171,6 +171,119 @@ def test_add_siesta_block_fragments_registers_real_vayesta_fragments():
     assert emb.fragments[1].siesta_buffer_atoms == (1,)
 
 
+def test_attach_siesta_results_to_fragments_by_block_id():
+    fragments = [
+        type("FakeFragment", (), {"siesta_block_id": 1})(),
+        type("FakeFragment", (), {"siesta_block_id": 0})(),
+    ]
+    results = [
+        adapter.SiestaEwfResult(
+            block_id=0,
+            machine_id=0,
+            rank=2,
+            core_atom_range=(0, 1),
+            input_atom_range=(0, 2),
+            core_atoms=(0,),
+            buffer_atoms=(1,),
+            core_atom_orbital_ranges={0: (0, 2)},
+            converged=True,
+            total_energy_ev=-1.25,
+            density_matrix_path=Path("block_0000.DM"),
+            hamiltonian_matrix_path=Path("block_0000.HSX"),
+            overlap_matrix_path=Path("block_0000.HSX"),
+            orbital_index_path=Path("block_0000.ORB_INDX"),
+            output_path=Path("siesta.out"),
+            core_matrix_metadata={"density": {"nnz": 4}},
+        ),
+        adapter.SiestaEwfResult(
+            block_id=1,
+            machine_id=0,
+            rank=3,
+            core_atom_range=(1, 2),
+            input_atom_range=(0, 2),
+            core_atoms=(1,),
+            buffer_atoms=(0,),
+            core_atom_orbital_ranges={1: (2, 4)},
+            converged=True,
+            total_energy_ev=-2.5,
+            density_matrix_path=Path("block_0001.DM"),
+            hamiltonian_matrix_path=Path("block_0001.HSX"),
+            overlap_matrix_path=Path("block_0001.HSX"),
+            orbital_index_path=Path("block_0001.ORB_INDX"),
+            output_path=Path("siesta.out"),
+            core_matrix_metadata={"density": {"nnz": 5}},
+        ),
+    ]
+
+    attached = adapter.attach_siesta_results_to_fragments(fragments, results)
+
+    assert attached == fragments
+    assert fragments[0].siesta_ewf_result.block_id == 1
+    assert fragments[0].siesta_rank == 3
+    assert fragments[0].siesta_total_energy_ev == -2.5
+    assert fragments[0].siesta_density_matrix_path == Path("block_0001.DM")
+    assert fragments[0].siesta_core_atom_orbital_ranges == {1: (2, 4)}
+    assert fragments[0].siesta_core_matrix_metadata == {"density": {"nnz": 5}}
+    assert fragments[1].siesta_ewf_result.block_id == 0
+
+
+def test_attach_siesta_results_to_fragments_rejects_missing_result():
+    fragment = type("FakeFragment", (), {"siesta_block_id": 4})()
+
+    with pytest.raises(ValueError, match="Missing SIESTA EWF result"):
+        adapter.attach_siesta_results_to_fragments([fragment], [])
+
+    assert adapter.attach_siesta_results_to_fragments([fragment], [], strict=False) == []
+
+
+def test_load_siesta_results_to_fragments_projects_run_directory(tmp_path):
+    (tmp_path / "blocks.json").write_text(
+        json.dumps(
+            [
+                {
+                    "block_id": 0,
+                    "core_atom_start": 0,
+                    "core_atom_end": 1,
+                    "input_atom_start": 0,
+                    "input_atom_end": 2,
+                    "local_to_global_atom_index": [0, 1],
+                }
+            ]
+        )
+    )
+    (tmp_path / "results.json").write_text(
+        json.dumps(
+            [
+                {
+                    "block_id": 0,
+                    "rank": 0,
+                    "returncode": 0,
+                    "converged": True,
+                    "total_energy_ev": -3.0,
+                    "density_matrix_path": "x.DM",
+                    "hamiltonian_matrix_path": "x.HSX",
+                    "overlap_matrix_path": "x.HSX",
+                    "orbital_index_path": "x.ORB_INDX",
+                    "output_path": "siesta.out",
+                    "atom_orbital_ranges": {"0": [0, 2], "1": [2, 4]},
+                }
+            ]
+        )
+    )
+    fragment = type("FakeFragment", (), {"siesta_block_id": 0})()
+
+    attached = adapter.load_siesta_results_to_fragments(
+        tmp_path,
+        [fragment],
+        require_matrices=False,
+    )
+
+    assert attached == [fragment]
+    assert fragment.siesta_ewf_result.block_id == 0
+    assert fragment.siesta_core_atom_orbital_ranges == {0: (0, 2)}
+    assert fragment.siesta_density_matrix_path == Path("x.DM")
+
+
 def test_generate_block_directories(tmp_path):
     fdf = adapter.parse_fdf(Path(__file__).resolve().parents[4] / "testcases" / "0386.fdf")
     blocks = adapter.partition_contiguous_atoms(len(fdf.atoms), block_atoms=200, buffer_atoms=10, num_machines=2)

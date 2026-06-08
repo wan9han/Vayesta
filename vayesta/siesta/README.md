@@ -35,6 +35,15 @@ SIESTA input/buffer metadata on the returned fragment:
 - `siesta_core_atom_range`
 - `siesta_input_atom_range`
 
+After a SIESTA run has been projected with `project_results_to_ewf`,
+`attach_siesta_results_to_fragments(fragments, results)` maps those
+`SiestaEwfResult` objects back to the same fragments by `siesta_block_id`.  It
+attaches paths and core matrix metadata as fragment attributes, including
+`siesta_ewf_result`, `siesta_density_matrix_path`,
+`siesta_hamiltonian_matrix_path`, `siesta_core_atom_orbital_ranges`, and
+`siesta_core_matrix_metadata`.  `load_siesta_results_to_fragments(workdir,
+fragments)` combines projection from a run directory with this attachment step.
+
 Example:
 
 ```python
@@ -176,6 +185,8 @@ The public collection helpers are:
 - `build_boundary_correction_plan(embedding_contract)`: derive explicit unparameterized correction slots.
 - `write_boundary_corrections_manifest(workdir)`: write those slots to `boundary_corrections.json`.
 - `project_results_to_ewf(workdir)`: combine `blocks.json` and `results.json` into `SiestaEwfResult` objects.
+- `attach_siesta_results_to_fragments(fragments, results)`: attach projected SIESTA results to existing Vayesta fragments by `siesta_block_id`.
+- `load_siesta_results_to_fragments(workdir, fragments)`: project a run directory and attach its results to fragments.
 - `write_ewf_results_manifest(workdir)`: write `ewf_results.json` with core-owned `SiestaEwfResult` metadata.
 - `assemble_global_matrices(workdir_or_results, natoms=None)`: assemble core-owned sparse DM/H/S entries into compact global orbital numbering.
 - `write_global_matrices_manifest(workdir, natoms=None)`: write `global_matrices.json` with the assembled matrix summary.

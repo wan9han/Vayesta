@@ -1047,6 +1047,59 @@ def add_siesta_block_fragments(
     return fragments
 
 
+def attach_siesta_results_to_fragments(
+    fragments: Sequence[object],
+    results: Sequence[SiestaEwfResult],
+    strict: bool = True,
+) -> list[object]:
+    """Attach projected SIESTA EWF results to Vayesta fragments by block id."""
+
+    results_by_block = {result.block_id: result for result in results}
+    attached = []
+    for fragment in fragments:
+        block_id = getattr(fragment, "siesta_block_id", None)
+        if block_id is None:
+            if strict:
+                raise ValueError("Fragment is missing siesta_block_id metadata")
+            continue
+        result = results_by_block.get(int(block_id))
+        if result is None:
+            if strict:
+                raise ValueError(f"Missing SIESTA EWF result for fragment block {block_id}")
+            continue
+        fragment.siesta_ewf_result = result
+        fragment.siesta_result_attached = True
+        fragment.siesta_rank = result.rank
+        fragment.siesta_total_energy_ev = result.total_energy_ev
+        fragment.siesta_density_matrix_path = result.density_matrix_path
+        fragment.siesta_hamiltonian_matrix_path = result.hamiltonian_matrix_path
+        fragment.siesta_overlap_matrix_path = result.overlap_matrix_path
+        fragment.siesta_orbital_index_path = result.orbital_index_path
+        fragment.siesta_core_atom_orbital_ranges = dict(result.core_atom_orbital_ranges)
+        fragment.siesta_core_matrix_metadata = dict(result.core_matrix_metadata)
+        attached.append(fragment)
+    return attached
+
+
+def load_siesta_results_to_fragments(
+    workdir: str | os.PathLike[str],
+    fragments: Sequence[object],
+    strict: bool = True,
+    require_complete: bool = True,
+    require_converged: bool = True,
+    require_matrices: bool = True,
+) -> list[object]:
+    """Project a SIESTA run directory and attach the results to Vayesta fragments."""
+
+    results = project_results_to_ewf(
+        workdir,
+        require_complete=require_complete,
+        require_converged=require_converged,
+        require_matrices=require_matrices,
+    )
+    return attach_siesta_results_to_fragments(fragments, results, strict=strict)
+
+
 def read_run_config(environ: dict[str, str] | None = None) -> SiestaRunConfig:
     """Read EWF/SIESTA adapter configuration from environment variables."""
 
