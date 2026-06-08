@@ -1380,6 +1380,9 @@ def summarize_run(workdir: str | os.PathLike[str]) -> dict:
         "max_block_wall_time_seconds": None if not wall_times else float(max(wall_times)),
         "min_block_wall_time_seconds": None if not wall_times else float(min(wall_times)),
         "mean_block_wall_time_seconds": None if not wall_times else float(sum(wall_times) / len(wall_times)),
+        "solver_used": _summarize_solver_used(results),
+        "ntpoly_methods": _summarize_ntpoly_methods(results),
+        "max_scf_steps": _summarize_max_scf_steps(results),
         "blocks": block_summaries,
     }
 
@@ -2057,14 +2060,59 @@ def _summarize_one_block(block: dict, result: dict | None, scheduled_rank: int |
         "total_energy_ev": None if result is None else result.get("total_energy_ev"),
         "density_norbitals": None,
         "hamiltonian_norbitals": None,
+        "solver_used": None,
+        "ntpoly_method": None,
+        "ntpoly_filter": None,
+        "ntpoly_tolerance": None,
+        "num_scf_steps": None,
+        "last_scf_step": None,
+        "last_scf_energy_ev": None,
+        "convergence_reason": None,
     }
     if result is not None:
         matrix_metadata = result.get("matrix_metadata", {})
         density = matrix_metadata.get("density", {})
         hsx = matrix_metadata.get("hamiltonian_overlap", {})
+        elsi = matrix_metadata.get("elsi", {})
+        solver_used = elsi.get("solver_used", [])
+        last_solver_settings = elsi.get("last_solver_settings", {})
+        run_diagnostics = result.get("run_diagnostics", {})
         summary["density_norbitals"] = density.get("norbitals")
         summary["hamiltonian_norbitals"] = hsx.get("norbitals")
+        summary["solver_used"] = solver_used
+        summary["ntpoly_method"] = last_solver_settings.get("nt_method")
+        summary["ntpoly_filter"] = last_solver_settings.get("nt_filter")
+        summary["ntpoly_tolerance"] = last_solver_settings.get("nt_tol")
+        summary["num_scf_steps"] = run_diagnostics.get("num_scf_steps")
+        summary["last_scf_step"] = run_diagnostics.get("last_scf_step")
+        summary["last_scf_energy_ev"] = run_diagnostics.get("last_scf_energy_ev")
+        summary["convergence_reason"] = run_diagnostics.get("convergence_reason")
     return summary
+
+
+def _summarize_solver_used(results: Sequence[dict]) -> list[str]:
+    solvers = set()
+    for result in results:
+        solvers.update(str(solver).upper() for solver in result.get("matrix_metadata", {}).get("elsi", {}).get("solver_used", []))
+    return sorted(solvers)
+
+
+def _summarize_ntpoly_methods(results: Sequence[dict]) -> list[int]:
+    methods = set()
+    for result in results:
+        method = result.get("matrix_metadata", {}).get("elsi", {}).get("last_solver_settings", {}).get("nt_method")
+        if method is not None:
+            methods.add(int(method))
+    return sorted(methods)
+
+
+def _summarize_max_scf_steps(results: Sequence[dict]) -> int | None:
+    steps = [
+        int(result.get("run_diagnostics", {}).get("num_scf_steps"))
+        for result in results
+        if result.get("run_diagnostics", {}).get("num_scf_steps") is not None
+    ]
+    return None if not steps else max(steps)
 
 
 def _load_or_create_run_summary(workdir: Path) -> dict:

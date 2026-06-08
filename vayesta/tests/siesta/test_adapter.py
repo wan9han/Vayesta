@@ -917,6 +917,16 @@ def test_write_run_summary_manifest_reports_scaling_metrics(tmp_path):
                     "matrix_metadata": {
                         "density": {"norbitals": 40},
                         "hamiltonian_overlap": {"norbitals": 40},
+                        "elsi": {
+                            "solver_used": ["NTPOLY"],
+                            "last_solver_settings": {"nt_method": 2, "nt_filter": 1.0e-9, "nt_tol": 1.0e-6},
+                        },
+                    },
+                    "run_diagnostics": {
+                        "num_scf_steps": 7,
+                        "last_scf_step": 7,
+                        "last_scf_energy_ev": -10.0,
+                        "convergence_reason": "scf_converged",
                     },
                 },
                 {
@@ -929,6 +939,16 @@ def test_write_run_summary_manifest_reports_scaling_metrics(tmp_path):
                     "matrix_metadata": {
                         "density": {"norbitals": 60},
                         "hamiltonian_overlap": {"norbitals": 60},
+                        "elsi": {
+                            "solver_used": ["NTPOLY"],
+                            "last_solver_settings": {"nt_method": 2, "nt_filter": 1.0e-9, "nt_tol": 1.0e-6},
+                        },
+                    },
+                    "run_diagnostics": {
+                        "num_scf_steps": 9,
+                        "last_scf_step": 9,
+                        "last_scf_energy_ev": -11.0,
+                        "convergence_reason": "scf_converged",
                     },
                 },
             ]
@@ -948,8 +968,15 @@ def test_write_run_summary_manifest_reports_scaling_metrics(tmp_path):
     assert payload["total_wall_time_seconds"] == 6.0
     assert payload["max_block_wall_time_seconds"] == 4.0
     assert payload["mean_block_wall_time_seconds"] == 3.0
+    assert payload["solver_used"] == ["NTPOLY"]
+    assert payload["ntpoly_methods"] == [2]
+    assert payload["max_scf_steps"] == 9
     assert payload["blocks"][0]["buffer_atoms"] == 6
     assert payload["blocks"][1]["density_norbitals"] == 60
+    assert payload["blocks"][1]["solver_used"] == ["NTPOLY"]
+    assert payload["blocks"][1]["ntpoly_method"] == 2
+    assert payload["blocks"][1]["num_scf_steps"] == 9
+    assert payload["blocks"][1]["convergence_reason"] == "scf_converged"
     assert json.loads((tmp_path / "run_summary.json").read_text()) == payload
 
 
