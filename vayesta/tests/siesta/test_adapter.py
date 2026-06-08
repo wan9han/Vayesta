@@ -1013,6 +1013,9 @@ def test_write_weak_scaling_report_compares_run_summaries(tmp_path):
                 "num_converged_results": 1,
                 "max_block_wall_time_seconds": 10.0,
                 "mean_block_wall_time_seconds": 10.0,
+                "solver_used": ["NTPOLY"],
+                "ntpoly_methods": [2],
+                "max_scf_steps": 8,
             }
         )
     )
@@ -1029,6 +1032,9 @@ def test_write_weak_scaling_report_compares_run_summaries(tmp_path):
                 "num_converged_results": 2,
                 "max_block_wall_time_seconds": 12.5,
                 "mean_block_wall_time_seconds": 11.0,
+                "solver_used": ["NTPOLY"],
+                "ntpoly_methods": [2],
+                "max_scf_steps": 12,
             }
         )
     )
@@ -1040,6 +1046,9 @@ def test_write_weak_scaling_report_compares_run_summaries(tmp_path):
     assert payload["runs"][0]["weak_scaling_efficiency_vs_baseline"] == 1.0
     assert payload["runs"][1]["weak_scaling_efficiency_vs_baseline"] == 0.8
     assert payload["runs"][1]["success_rate"] == 1.0
+    assert payload["runs"][1]["solver_used"] == ["NTPOLY"]
+    assert payload["runs"][1]["ntpoly_methods"] == [2]
+    assert payload["runs"][1]["max_scf_steps"] == 12
     assert json.loads((tmp_path / "weak.json").read_text()) == payload
 
 

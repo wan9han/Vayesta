@@ -2138,6 +2138,9 @@ def _weak_scaling_run_entry(summary: dict, baseline_time: float | None) -> dict:
         "converged_rate": converged_rate,
         "max_block_wall_time_seconds": max_time,
         "mean_block_wall_time_seconds": summary.get("mean_block_wall_time_seconds"),
+        "solver_used": summary.get("solver_used", []),
+        "ntpoly_methods": summary.get("ntpoly_methods", []),
+        "max_scf_steps": summary.get("max_scf_steps"),
         "weak_scaling_efficiency_vs_baseline": _weak_scaling_efficiency(baseline_time, max_time),
     }
 
