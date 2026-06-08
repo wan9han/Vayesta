@@ -78,6 +78,45 @@ class SiestaBlock:
 
 
 @dataclasses.dataclass(frozen=True)
+class SiestaSolverConfig:
+    """SIESTA/ELSI solver settings forced for each local block."""
+
+    ntpoly_method: int = 2
+    ntpoly_filter: float = 1.0e-9
+    ntpoly_tolerance: float = 1.0e-6
+    max_scf_iterations: int = 150
+    dm_number_pulay: int = 6
+    dm_mixing_weight: float = 0.05
+
+    def to_fdf_options(self) -> dict[str, str]:
+        return {
+            "solutionmethod": "SolutionMethod     ELSI",
+            "elsisolver": "ELSI.Solver        ntpoly",
+            "elsintpolymethod": f"ELSI.NTPoly.Method {self.ntpoly_method}",
+            "elsintpolyfilter": f"ELSI.NTPoly.Filter {self.ntpoly_filter:.1e}",
+            "elsintpolytolerance": f"ELSI.NTPoly.Tolerance {self.ntpoly_tolerance:.1e}",
+            "maxscfiterations": f"MaxSCFIterations    {self.max_scf_iterations}",
+            "dmnumberpulay": f"DM.NumberPulay    {self.dm_number_pulay}",
+            "dmmixingweight": f"DM.MixingWeight    {self.dm_mixing_weight:.6f}",
+            "writedm": "WriteDM          true",
+            "savehs": "SaveHS           true",
+            "writeorbitalindex": "WriteOrbitalIndex true",
+        }
+
+    def to_metadata(self) -> dict:
+        return {
+            "solution_method": "ELSI",
+            "elsi_solver": "ntpoly",
+            "ntpoly_method": self.ntpoly_method,
+            "ntpoly_filter": self.ntpoly_filter,
+            "ntpoly_tolerance": self.ntpoly_tolerance,
+            "max_scf_iterations": self.max_scf_iterations,
+            "dm_number_pulay": self.dm_number_pulay,
+            "dm_mixing_weight": self.dm_mixing_weight,
+        }
+
+
+@dataclasses.dataclass(frozen=True)
 class SiestaRunConfig:
     """Environment-controlled SIESTA adapter configuration."""
 
@@ -93,6 +132,7 @@ class SiestaRunConfig:
     buffer_groups: int
     terminal_cap_atoms: int
     dry_run: bool
+    solver: SiestaSolverConfig = dataclasses.field(default_factory=SiestaSolverConfig)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -110,6 +150,7 @@ class SiestaResult:
     atom_orbital_ranges: dict[int, tuple[int, int]]
     output_path: Path
     matrix_metadata: dict[str, dict] = dataclasses.field(default_factory=dict)
+    run_diagnostics: dict[str, object] = dataclasses.field(default_factory=dict)
 
     def to_metadata(self) -> dict:
         return {
@@ -126,6 +167,7 @@ class SiestaResult:
             },
             "output_path": str(self.output_path),
             "matrix_metadata": self.matrix_metadata,
+            "run_diagnostics": self.run_diagnostics,
         }
 
 
@@ -370,6 +412,7 @@ class SiestaBlockWorkflow:
             pseudopotentials=self.pseudopotentials,
             siesta_bin=self.config.siesta_bin,
             threads_per_proc=self.config.threads_per_proc,
+            solver_config=self.config.solver,
         )
         write_block_manifest(self.config.workdir, block_dirs)
         write_schedule_manifest(
@@ -457,6 +500,7 @@ class SiestaEwfResult:
     output_path: Path | None
     matrix_metadata: dict[str, dict] = dataclasses.field(default_factory=dict)
     core_matrix_metadata: dict[str, dict] = dataclasses.field(default_factory=dict)
+    run_diagnostics: dict[str, object] = dataclasses.field(default_factory=dict)
 
     def to_metadata(self) -> dict:
         return {
@@ -480,6 +524,7 @@ class SiestaEwfResult:
             "output_path": _path_to_str(self.output_path),
             "matrix_metadata": self.matrix_metadata,
             "core_matrix_metadata": self.core_matrix_metadata,
+            "run_diagnostics": self.run_diagnostics,
         }
 
     def read_core_density_matrix(self) -> SiestaSparseCoreBlock:
@@ -677,6 +722,7 @@ def generate_block_directories(
     pseudopotentials: Iterable[str | os.PathLike[str]] = (),
     siesta_bin: str | None = None,
     threads_per_proc: int = 1,
+    solver_config: SiestaSolverConfig | None = None,
 ) -> list[Path]:
     """Generate one SIESTA input directory per block."""
 
@@ -689,9 +735,13 @@ def generate_block_directories(
         atoms = fdf.atoms[block.input_atom_start : block.input_atom_end]
         local_to_global = [atom.global_index for atom in atoms]
 
-        (block_dir / "input.fdf").write_text(_render_block_fdf(fdf, atoms, block.block_id))
+        solver_config = SiestaSolverConfig() if solver_config is None else solver_config
+        (block_dir / "input.fdf").write_text(_render_block_fdf(fdf, atoms, block.block_id, solver_config))
         (block_dir / "block.json").write_text(
             json.dumps(block.to_metadata(local_to_global), indent=2, sort_keys=True) + "\n"
+        )
+        (block_dir / "solver_config.json").write_text(
+            json.dumps(solver_config.to_metadata(), indent=2, sort_keys=True) + "\n"
         )
         (block_dir / "run.sh").write_text(_render_run_script(siesta_bin, threads_per_proc))
         (block_dir / "run.sh").chmod(0o755)
@@ -1142,6 +1192,14 @@ def read_run_config(environ: dict[str, str] | None = None) -> SiestaRunConfig:
     block_atoms = _get_optional_int(environ, "EWF_BLOCK_ATOMS")
     block_groups = _get_optional_int(environ, "EWF_BLOCK_GROUPS")
     group_size_atoms = _get_optional_int(environ, "EWF_GROUP_SIZE_ATOMS")
+    solver = SiestaSolverConfig(
+        ntpoly_method=_get_int(environ, "EWF_NTPOLY_METHOD", 2),
+        ntpoly_filter=_get_positive_float(environ, "EWF_NTPOLY_FILTER", 1.0e-9),
+        ntpoly_tolerance=_get_positive_float(environ, "EWF_NTPOLY_TOLERANCE", 1.0e-6),
+        max_scf_iterations=_get_int(environ, "EWF_MAX_SCF_ITERATIONS", 150),
+        dm_number_pulay=_get_int(environ, "EWF_DM_NUMBER_PULAY", 6),
+        dm_mixing_weight=_get_positive_float(environ, "EWF_DM_MIXING_WEIGHT", 0.05),
+    )
     return SiestaRunConfig(
         num_machines=num_machines,
         procs_per_machine=procs_per_machine,
@@ -1155,6 +1213,7 @@ def read_run_config(environ: dict[str, str] | None = None) -> SiestaRunConfig:
         buffer_groups=_get_nonnegative_int(environ, "EWF_BLOCK_BUFFER_GROUPS", 0),
         terminal_cap_atoms=_get_nonnegative_int(environ, "EWF_TERMINAL_CAP_ATOMS", 0),
         dry_run=_get_bool(environ, "EWF_SIESTA_DRY_RUN", True),
+        solver=solver,
     )
 
 
@@ -1229,12 +1288,14 @@ def read_siesta_output(block_dir: str | os.PathLike[str]) -> SiestaResult:
             atom_orbital_ranges=atom_orbital_ranges,
             output_path=output_path,
             matrix_metadata=matrix_metadata,
+            run_diagnostics={},
         )
 
     text = output_path.read_text(errors="replace")
     converged = _detect_convergence(text)
     total_energy_ev = _detect_total_energy_ev(text)
     wall_time_seconds = _detect_wall_time_seconds(text)
+    run_diagnostics = _detect_run_diagnostics(text)
     return SiestaResult(
         block_id=block_id,
         converged=converged,
@@ -1247,6 +1308,7 @@ def read_siesta_output(block_dir: str | os.PathLike[str]) -> SiestaResult:
         atom_orbital_ranges=atom_orbital_ranges,
         output_path=output_path,
         matrix_metadata=matrix_metadata,
+        run_diagnostics=run_diagnostics,
     )
 
 
@@ -1683,6 +1745,9 @@ def validate_ewf_results(
         solver_used = {str(solver).upper() for solver in elsi_metadata.get("solver_used", [])}
         if elsi_metadata and solver_used != {"NTPOLY"}:
             errors.append(f"Block {result.block_id} used ELSI solver {sorted(solver_used)}, expected ['NTPOLY']")
+        nt_method = elsi_metadata.get("last_solver_settings", {}).get("nt_method")
+        if nt_method is not None and int(nt_method) != 2:
+            errors.append(f"Block {result.block_id} used NTPoly method {nt_method}, expected TRS2 method 2")
         if min_buffer_atoms > 0 and _is_internal_block(result, natoms) and len(result.buffer_atoms) < min_buffer_atoms:
             warnings.append(
                 f"Block {result.block_id} has {len(result.buffer_atoms)} buffer atoms; "
@@ -1750,22 +1815,16 @@ def default_block_atoms(natoms: int, num_machines: int, procs_per_machine: int) 
     return max(1, math.ceil(natoms / nworkers))
 
 
-def _render_block_fdf(fdf: FdfInput, atoms: Sequence[Atom], block_id: int) -> str:
+def _render_block_fdf(
+    fdf: FdfInput,
+    atoms: Sequence[Atom],
+    block_id: int,
+    solver_config: SiestaSolverConfig | None = None,
+) -> str:
     out: list[str] = []
     natoms = len(atoms)
-    forced_options = {
-        "solutionmethod": "SolutionMethod     ELSI",
-        "elsisolver": "ELSI.Solver        ntpoly",
-        "elsintpolymethod": "ELSI.NTPoly.Method 2",
-        "elsintpolyfilter": "ELSI.NTPoly.Filter 1.0e-9",
-        "elsintpolytolerance": "ELSI.NTPoly.Tolerance 1.0e-6",
-        "maxscfiterations": "MaxSCFIterations    150",
-        "dmnumberpulay": "DM.NumberPulay    6",
-        "dmmixingweight": "DM.MixingWeight    0.050000",
-        "writedm": "WriteDM          true",
-        "savehs": "SaveHS           true",
-        "writeorbitalindex": "WriteOrbitalIndex true",
-    }
+    solver_config = SiestaSolverConfig() if solver_config is None else solver_config
+    forced_options = solver_config.to_fdf_options()
     seen_options: set[str] = set()
     for lineno, line in enumerate(fdf.lines):
         lower = line.strip().lower()
@@ -1822,6 +1881,7 @@ def _project_one_result_to_ewf(block: dict, result: dict) -> SiestaEwfResult:
         output_path=_str_to_path(result.get("output_path")),
         matrix_metadata=result.get("matrix_metadata", {}),
         core_matrix_metadata=result.get("core_matrix_metadata", {}),
+        run_diagnostics=result.get("run_diagnostics", {}),
     )
 
 
@@ -2506,6 +2566,13 @@ def _get_nonnegative_int(environ: dict[str, str], name: str, default: int) -> in
     return value
 
 
+def _get_positive_float(environ: dict[str, str], name: str, default: float) -> float:
+    value = float(environ.get(name, default))
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    return value
+
+
 def _get_bool(environ: dict[str, str], name: str, default: bool) -> bool:
     raw = environ.get(name)
     if raw is None:
@@ -2546,6 +2613,50 @@ def _detect_wall_time_seconds(text: str) -> float | None:
         matches = re.findall(pattern, text, flags=re.IGNORECASE)
         if matches:
             return float(matches[-1])
+    return None
+
+
+def _detect_run_diagnostics(text: str) -> dict[str, object]:
+    scf_steps = []
+    for match in re.finditer(r"^\s*scf:\s+(\d+)\s+(.+)$", text, flags=re.MULTILINE | re.IGNORECASE):
+        values = _parse_float_fields(match.group(2))
+        scf_steps.append(
+            {
+                "step": int(match.group(1)),
+                "values": values,
+                "total_energy_ev": values[1] if len(values) > 1 else None,
+            }
+        )
+
+    diagnostics: dict[str, object] = {
+        "num_scf_steps": len(scf_steps),
+        "last_scf_step": scf_steps[-1]["step"] if scf_steps else None,
+        "last_scf_energy_ev": scf_steps[-1]["total_energy_ev"] if scf_steps else None,
+        "convergence_reason": _detect_convergence_reason(text),
+    }
+    if scf_steps:
+        diagnostics["first_scf_energy_ev"] = scf_steps[0]["total_energy_ev"]
+    return diagnostics
+
+
+def _parse_float_fields(text: str) -> list[float]:
+    values = []
+    for field in text.split():
+        try:
+            values.append(float(field))
+        except ValueError:
+            pass
+    return values
+
+
+def _detect_convergence_reason(text: str) -> str | None:
+    lower = text.lower()
+    if "scf_not_conv" in lower or "scf did not converge" in lower:
+        return "max_scf_iterations_or_required_convergence_not_met"
+    if "scf converged" in lower or "scf cycle converged" in lower:
+        return "scf_converged"
+    if "elpa" in lower and "ntpoly" not in lower:
+        return "non_ntpoly_solver_output_detected"
     return None
 
 

@@ -335,21 +335,32 @@ def test_generate_block_input_forces_required_output_files(tmp_path):
     fdf = adapter.parse_fdf(fdf_path)
     blocks = adapter.partition_contiguous_atoms(len(fdf.atoms), block_atoms=2)
 
-    generated = adapter.generate_block_directories(fdf, blocks, tmp_path / "runs")
+    solver = adapter.SiestaSolverConfig(
+        ntpoly_filter=1.0e-8,
+        ntpoly_tolerance=5.0e-7,
+        max_scf_iterations=180,
+        dm_number_pulay=8,
+        dm_mixing_weight=0.03,
+    )
+    generated = adapter.generate_block_directories(fdf, blocks, tmp_path / "runs", solver_config=solver)
     input_text = (generated[0] / "input.fdf").read_text()
+    solver_config = json.loads((generated[0] / "solver_config.json").read_text())
 
     assert "SystemLabel      block_0000" in input_text
     assert "SolutionMethod     ELSI" in input_text
     assert "ELSI.Solver        ntpoly" in input_text
     assert "ELSI.NTPoly.Method 2" in input_text
-    assert "ELSI.NTPoly.Filter 1.0e-9" in input_text
-    assert "ELSI.NTPoly.Tolerance 1.0e-6" in input_text
-    assert "MaxSCFIterations    150" in input_text
-    assert "DM.NumberPulay    6" in input_text
-    assert "DM.MixingWeight    0.050000" in input_text
+    assert "ELSI.NTPoly.Filter 1.0e-08" in input_text
+    assert "ELSI.NTPoly.Tolerance 5.0e-07" in input_text
+    assert "MaxSCFIterations    180" in input_text
+    assert "DM.NumberPulay    8" in input_text
+    assert "DM.MixingWeight    0.030000" in input_text
     assert "SaveHS           true" in input_text
     assert "WriteDM          true" in input_text
     assert "WriteOrbitalIndex true" in input_text
+    assert solver_config["elsi_solver"] == "ntpoly"
+    assert solver_config["ntpoly_method"] == 2
+    assert solver_config["max_scf_iterations"] == 180
 
 
 def test_infer_bonds_and_boundary_manifest_detects_buffer_coverage(tmp_path):
@@ -562,6 +573,11 @@ def test_read_run_config_from_environment(tmp_path):
             "EWF_BLOCK_ATOMS": "1000",
             "EWF_BLOCK_BUFFER_ATOMS": "100",
             "EWF_SIESTA_DRY_RUN": "false",
+            "EWF_NTPOLY_FILTER": "1e-8",
+            "EWF_NTPOLY_TOLERANCE": "1e-5",
+            "EWF_MAX_SCF_ITERATIONS": "180",
+            "EWF_DM_NUMBER_PULAY": "8",
+            "EWF_DM_MIXING_WEIGHT": "0.03",
         }
     )
 
@@ -576,6 +592,12 @@ def test_read_run_config_from_environment(tmp_path):
     assert config.group_size_atoms is None
     assert config.buffer_groups == 0
     assert config.dry_run is False
+    assert config.solver.ntpoly_method == 2
+    assert config.solver.ntpoly_filter == 1.0e-8
+    assert config.solver.ntpoly_tolerance == 1.0e-5
+    assert config.solver.max_scf_iterations == 180
+    assert config.solver.dm_number_pulay == 8
+    assert config.solver.dm_mixing_weight == 0.03
 
 
 def test_read_run_config_supports_group_partitioning(tmp_path):
@@ -754,6 +776,8 @@ def test_read_siesta_output_with_scalar_and_matrix_paths(tmp_path):
     assert result.matrix_metadata["hamiltonian_overlap"]["double_precision"] is True
     assert result.matrix_metadata["elsi"]["solver_used"] == ["NTPOLY"]
     assert result.matrix_metadata["elsi"]["last_solver_settings"]["nt_method"] == 2
+    assert result.run_diagnostics["num_scf_steps"] == 0
+    assert result.run_diagnostics["convergence_reason"] == "scf_converged"
 
 
 def test_read_siesta_output_parses_scf_energy_and_orbital_ranges(tmp_path):
@@ -783,6 +807,10 @@ def test_read_siesta_output_parses_scf_energy_and_orbital_ranges(tmp_path):
 
     assert result.converged is False
     assert result.total_energy_ev == -20.0
+    assert result.run_diagnostics["num_scf_steps"] == 1
+    assert result.run_diagnostics["last_scf_step"] == 1
+    assert result.run_diagnostics["last_scf_energy_ev"] == -20.0
+    assert result.run_diagnostics["convergence_reason"] == "max_scf_iterations_or_required_convergence_not_met"
     assert result.atom_orbital_ranges == {10: (0, 2), 11: (2, 3)}
     assert result.to_metadata()["atom_orbital_ranges"] == {"10": [0, 2], "11": [2, 3]}
 
@@ -1299,6 +1327,32 @@ def test_validate_ewf_results_rejects_non_ntpoly_solver_metadata():
 
     assert report.ok is False
     assert "expected ['NTPOLY']" in report.errors[0]
+
+
+def test_validate_ewf_results_rejects_non_trs2_ntpoly_method():
+    result = adapter.SiestaEwfResult(
+        block_id=0,
+        machine_id=0,
+        rank=0,
+        core_atom_range=(0, 1),
+        input_atom_range=(0, 1),
+        core_atoms=(0,),
+        buffer_atoms=(),
+        core_atom_orbital_ranges={0: (0, 1)},
+        converged=True,
+        total_energy_ev=-1.0,
+        density_matrix_path=Path("x.DM"),
+        hamiltonian_matrix_path=Path("x.HSX"),
+        overlap_matrix_path=Path("x.HSX"),
+        orbital_index_path=Path("x.ORB_INDX"),
+        output_path=Path("siesta.out"),
+        matrix_metadata={"elsi": {"solver_used": ["NTPOLY"], "last_solver_settings": {"nt_method": 1}}},
+    )
+
+    report = adapter.validate_ewf_results([result], natoms=1, require_matrices=False)
+
+    assert report.ok is False
+    assert "expected TRS2 method 2" in report.errors[0]
 
 
 def test_assemble_global_matrices_from_core_owned_blocks(tmp_path):
