@@ -91,6 +91,7 @@ class SiestaRunConfig:
     block_groups: int | None
     group_size_atoms: int | None
     buffer_groups: int
+    terminal_cap_atoms: int
     dry_run: bool
 
 
@@ -590,14 +591,16 @@ def partition_contiguous_atom_groups(
     group_size_atoms: int,
     block_groups: int,
     buffer_groups: int = 0,
+    terminal_cap_atoms: int = 0,
     num_machines: int | None = None,
 ) -> list[SiestaBlock]:
     """Split an ordered chain into coarse blocks aligned to atom groups.
 
     This is useful for generated polyethylene inputs where one repeat group is
-    ordered as `C C H H H H`, with optional terminal hydrogens appended to the
-    final group.  The returned blocks still use contiguous atom ranges, but
-    their boundaries are aligned to repeat groups rather than arbitrary atoms.
+    ordered as `C C H H H H`.  If `terminal_cap_atoms=2`, one terminal atom is
+    assigned to the first group and one to the final group.  The returned blocks
+    still use contiguous atom ranges, but their boundaries are aligned to repeat
+    groups rather than arbitrary atoms.
     """
 
     if natoms <= 0:
@@ -608,19 +611,10 @@ def partition_contiguous_atom_groups(
         raise ValueError("block_groups must be positive")
     if buffer_groups < 0:
         raise ValueError("buffer_groups must be non-negative")
+    if terminal_cap_atoms < 0:
+        raise ValueError("terminal_cap_atoms must be non-negative")
 
-    groups = []
-    full_groups, remainder = divmod(natoms, group_size_atoms)
-    if full_groups == 0:
-        groups.append((0, natoms))
-    else:
-        for group_id in range(full_groups):
-            start = group_id * group_size_atoms
-            end = start + group_size_atoms
-            groups.append((start, end))
-        if remainder:
-            start, _ = groups[-1]
-            groups[-1] = (start, natoms)
+    groups = _contiguous_atom_group_bounds(natoms, group_size_atoms, terminal_cap_atoms)
     ngroups = len(groups)
 
     blocks = []
@@ -640,6 +634,40 @@ def partition_contiguous_atom_groups(
             )
         )
     return blocks
+
+
+def _contiguous_atom_group_bounds(
+    natoms: int,
+    group_size_atoms: int,
+    terminal_cap_atoms: int = 0,
+) -> list[tuple[int, int]]:
+    if terminal_cap_atoms == 2 and natoms > group_size_atoms and (natoms - terminal_cap_atoms) % group_size_atoms == 0:
+        repeat_groups = (natoms - terminal_cap_atoms) // group_size_atoms
+        if repeat_groups >= 2:
+            sizes = [group_size_atoms + 1]
+            sizes.extend([group_size_atoms] * (repeat_groups - 2))
+            sizes.append(group_size_atoms + 1)
+            groups = []
+            start = 0
+            for size in sizes:
+                end = start + size
+                groups.append((start, end))
+                start = end
+            return groups
+
+    groups = []
+    full_groups, remainder = divmod(natoms, group_size_atoms)
+    if full_groups == 0:
+        groups.append((0, natoms))
+    else:
+        for group_id in range(full_groups):
+            start = group_id * group_size_atoms
+            end = start + group_size_atoms
+            groups.append((start, end))
+        if remainder:
+            start, _ = groups[-1]
+            groups[-1] = (start, natoms)
+    return groups
 
 
 def generate_block_directories(
@@ -707,6 +735,7 @@ def build_blocks_from_config(fdf: FdfInput, config: SiestaRunConfig) -> list[Sie
             group_size_atoms=config.group_size_atoms,
             block_groups=config.block_groups,
             buffer_groups=config.buffer_groups,
+            terminal_cap_atoms=config.terminal_cap_atoms,
             num_machines=config.num_machines,
         )
     block_atoms = config.block_atoms or default_block_atoms(
@@ -1124,6 +1153,7 @@ def read_run_config(environ: dict[str, str] | None = None) -> SiestaRunConfig:
         block_groups=block_groups,
         group_size_atoms=group_size_atoms,
         buffer_groups=_get_nonnegative_int(environ, "EWF_BLOCK_BUFFER_GROUPS", 0),
+        terminal_cap_atoms=_get_nonnegative_int(environ, "EWF_TERMINAL_CAP_ATOMS", 0),
         dry_run=_get_bool(environ, "EWF_SIESTA_DRY_RUN", True),
     )
 
@@ -1722,6 +1752,9 @@ def _render_block_fdf(fdf: FdfInput, atoms: Sequence[Atom], block_id: int) -> st
         "elsintpolymethod": "ELSI.NTPoly.Method 2",
         "elsintpolyfilter": "ELSI.NTPoly.Filter 1.0e-9",
         "elsintpolytolerance": "ELSI.NTPoly.Tolerance 1.0e-6",
+        "maxscfiterations": "MaxSCFIterations    150",
+        "dmnumberpulay": "DM.NumberPulay    6",
+        "dmmixingweight": "DM.MixingWeight    0.050000",
         "writedm": "WriteDM          true",
         "savehs": "SaveHS           true",
         "writeorbitalindex": "WriteOrbitalIndex true",

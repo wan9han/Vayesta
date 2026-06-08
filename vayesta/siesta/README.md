@@ -110,6 +110,9 @@ output files needed by the first reader contract:
 - `ELSI.NTPoly.Method 2`
 - `ELSI.NTPoly.Filter 1.0e-9`
 - `ELSI.NTPoly.Tolerance 1.0e-6`
+- `MaxSCFIterations 150`
+- `DM.NumberPulay 6`
+- `DM.MixingWeight 0.050000`
 - `WriteDM true`
 - `SaveHS true`
 - `WriteOrbitalIndex true`
@@ -279,6 +282,7 @@ efficiency fields are `null`.
 - `EWF_GROUP_SIZE_ATOMS`: optional contiguous atom count per chain/repeat group.
 - `EWF_BLOCK_GROUPS`: optional core groups per block. Must be set with `EWF_GROUP_SIZE_ATOMS`.
 - `EWF_BLOCK_BUFFER_GROUPS`: optional group-count buffer on each side, default `0`.
+- `EWF_TERMINAL_CAP_ATOMS`: optional terminal atoms split between the first and final repeat groups; use `2` for generated finite polyethylene chains.
 - `EWF_SIESTA_BIN`: SIESTA executable for non-dry-run execution.
 - `EWF_SIESTA_DRY_RUN`: default `true`; set to `false` to execute SIESTA.
 
@@ -300,11 +304,13 @@ terminal hydrogens, prefer group-aligned blocks:
 EWF_GROUP_SIZE_ATOMS=6 \
 EWF_BLOCK_GROUPS=10 \
 EWF_BLOCK_BUFFER_GROUPS=1 \
+EWF_TERMINAL_CAP_ATOMS=2 \
 python3 ewf_siesta_driver.py testcases/0386.fdf --pseudo testcases/C.psf --pseudo testcases/H.psf
 ```
 
-The tail atoms which do not fill a complete group are attached to the final
-group, so terminal hydrogens do not become a separate SIESTA block.
+For generated finite polyethylene chains, `EWF_TERMINAL_CAP_ATOMS=2` keeps one
+terminal atom with the first repeat group and one with the final repeat group,
+so terminal hydrogens do not become uncovered nonlocal boundary bonds.
 
 To run SIESTA instead of only generating inputs:
 

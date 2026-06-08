@@ -85,6 +85,21 @@ def test_partition_contiguous_atom_groups_aligns_core_and_buffer_to_groups():
     assert [b.machine_id for b in blocks] == [0, 1, 0]
 
 
+def test_partition_contiguous_atom_groups_can_keep_terminal_caps_with_end_groups():
+    blocks = adapter.partition_contiguous_atom_groups(
+        26,
+        group_size_atoms=6,
+        block_groups=1,
+        buffer_groups=1,
+        terminal_cap_atoms=2,
+        num_machines=4,
+    )
+
+    assert [(b.core_atom_start, b.core_atom_end) for b in blocks] == [(0, 7), (7, 13), (13, 19), (19, 26)]
+    assert [(b.input_atom_start, b.input_atom_end) for b in blocks] == [(0, 13), (0, 19), (7, 26), (13, 26)]
+    assert [b.machine_id for b in blocks] == [0, 1, 2, 3]
+
+
 def test_assign_blocks_to_rank_within_machine():
     blocks = adapter.partition_contiguous_atoms(24, block_atoms=2, buffer_atoms=0, num_machines=2)
 
@@ -329,6 +344,9 @@ def test_generate_block_input_forces_required_output_files(tmp_path):
     assert "ELSI.NTPoly.Method 2" in input_text
     assert "ELSI.NTPoly.Filter 1.0e-9" in input_text
     assert "ELSI.NTPoly.Tolerance 1.0e-6" in input_text
+    assert "MaxSCFIterations    150" in input_text
+    assert "DM.NumberPulay    6" in input_text
+    assert "DM.MixingWeight    0.050000" in input_text
     assert "SaveHS           true" in input_text
     assert "WriteDM          true" in input_text
     assert "WriteOrbitalIndex true" in input_text
@@ -567,12 +585,14 @@ def test_read_run_config_supports_group_partitioning(tmp_path):
             "EWF_GROUP_SIZE_ATOMS": "6",
             "EWF_BLOCK_GROUPS": "10",
             "EWF_BLOCK_BUFFER_GROUPS": "2",
+            "EWF_TERMINAL_CAP_ATOMS": "2",
         }
     )
 
     assert config.group_size_atoms == 6
     assert config.block_groups == 10
     assert config.buffer_groups == 2
+    assert config.terminal_cap_atoms == 2
 
 
 def test_run_assigned_blocks_sets_thread_environment(tmp_path):
@@ -603,6 +623,7 @@ def test_run_assigned_blocks_sets_thread_environment(tmp_path):
         block_groups=None,
         group_size_atoms=None,
         buffer_groups=0,
+        terminal_cap_atoms=0,
         dry_run=False,
     )
 
@@ -643,6 +664,7 @@ def test_run_assigned_blocks_strips_parent_mpi_environment(tmp_path, monkeypatch
         block_groups=None,
         group_size_atoms=None,
         buffer_groups=0,
+        terminal_cap_atoms=0,
         dry_run=False,
     )
 
@@ -668,6 +690,7 @@ def test_run_assigned_blocks_requires_binary_when_not_dry_run(tmp_path):
         block_groups=None,
         group_size_atoms=None,
         buffer_groups=0,
+        terminal_cap_atoms=0,
         dry_run=False,
     )
 
@@ -1599,7 +1622,7 @@ def test_gen_py_orders_atoms_by_polyethylene_chain_groups(tmp_path):
     fdf_path.write_text(completed.stdout)
     fdf = adapter.parse_fdf(fdf_path)
 
-    assert [atom.species for atom in fdf.atoms[:14]] == [1, 1, 2, 2, 2, 2, 1, 1, 2, 2, 2, 2, 2, 2]
+    assert [atom.species for atom in fdf.atoms[:14]] == [1, 1, 2, 2, 2, 2, 2, 1, 1, 2, 2, 2, 2, 2]
 
 
 def test_prepare_siesta_workflow_runs_dry_rank_and_finalize(tmp_path):
@@ -1615,6 +1638,7 @@ def test_prepare_siesta_workflow_runs_dry_rank_and_finalize(tmp_path):
         block_groups=None,
         group_size_atoms=None,
         buffer_groups=0,
+        terminal_cap_atoms=0,
         dry_run=True,
     )
 
