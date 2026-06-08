@@ -295,6 +295,42 @@ def test_embedding_contract_manifest_records_pending_boundary_corrections(tmp_pa
     assert json.loads((tmp_path / "embedding_contract.json").read_text()) == payload
 
 
+def test_boundary_corrections_manifest_creates_unparameterized_slots(tmp_path):
+    (tmp_path / "embedding_contract.json").write_text(
+        json.dumps(
+            {
+                "terms": [
+                    {
+                        "block_id": 0,
+                        "bond_atoms": [1, 2],
+                        "core_atom": 1,
+                        "environment_atom": 2,
+                        "status": "pending_embedding_correction",
+                    },
+                    {
+                        "block_id": 1,
+                        "bond_atoms": [3, 4],
+                        "core_atom": 3,
+                        "environment_atom": 4,
+                        "status": "invalid_uncovered_boundary",
+                    },
+                ]
+            }
+        )
+    )
+
+    payload = adapter.write_boundary_corrections_manifest(tmp_path)
+
+    assert payload["correction_level"] == "placeholder"
+    assert payload["num_corrections"] == 1
+    assert payload["num_unparameterized_corrections"] == 1
+    assert payload["corrections"][0]["correction_type"] == "boundary_bond_embedding"
+    assert payload["corrections"][0]["hamiltonian_embedding_potential"] is None
+    assert payload["corrections"][0]["energy_correction_ev"] is None
+    assert payload["corrections"][0]["status"] == "not_parameterized"
+    assert json.loads((tmp_path / "boundary_corrections.json").read_text()) == payload
+
+
 def test_electron_constraint_manifest_reports_valence_deviation(tmp_path):
     fdf_path = tmp_path / "methane.fdf"
     fdf_path.write_text(
@@ -1022,6 +1058,9 @@ def test_validate_ewf_results_rejects_uncovered_boundary_bonds(tmp_path):
     (tmp_path / "electron_constraint.json").write_text(
         json.dumps({"electron_count_deviation": -0.5})
     )
+    (tmp_path / "boundary_corrections.json").write_text(
+        json.dumps({"num_unparameterized_corrections": 1})
+    )
 
     report = adapter.validate_ewf_results(tmp_path, natoms=1, require_matrices=False)
 
@@ -1030,6 +1069,7 @@ def test_validate_ewf_results_rejects_uncovered_boundary_bonds(tmp_path):
     assert "embedding term [0, 1] has uncovered boundary" in report.errors[1]
     assert "1 boundary embedding terms require" in report.warnings[0]
     assert "electron-count deviation -0.5" in report.warnings[1]
+    assert "1 boundary correction slots are not parameterized" in report.warnings[2]
 
 
 def test_assemble_global_matrices_from_core_owned_blocks(tmp_path):
@@ -1429,6 +1469,7 @@ def test_prepare_siesta_workflow_runs_dry_rank_and_finalize(tmp_path):
     assert (config.workdir / "schedule.json").exists()
     assert (config.workdir / "boundary.json").exists()
     assert (config.workdir / "embedding_contract.json").exists()
+    assert (config.workdir / "boundary_corrections.json").exists()
     assert (config.workdir / "result_rank_0000.json").exists()
     assert payload["results"] == []
     assert payload["run_summary"]["scheduled_ranks"] == [0, 1]

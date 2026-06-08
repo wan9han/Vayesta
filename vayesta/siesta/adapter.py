@@ -379,6 +379,7 @@ class SiestaBlockWorkflow:
         )
         write_boundary_manifest(self.config.workdir, self.fdf, self.blocks)
         write_embedding_contract_manifest(self.config.workdir)
+        write_boundary_corrections_manifest(self.config.workdir)
         return block_dirs
 
     def assigned_blocks(self, machine_id: int, local_rank: int) -> list[SiestaBlock]:
@@ -856,6 +857,47 @@ def write_embedding_contract_manifest(workdir: str | os.PathLike[str]) -> dict:
         raise FileNotFoundError(boundary_path)
     payload = build_embedding_contract(json.loads(boundary_path.read_text()))
     (workdir / "embedding_contract.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
+def build_boundary_correction_plan(embedding_contract: dict) -> dict:
+    """Build placeholder correction slots for each pending boundary embedding term."""
+
+    corrections = []
+    for term in embedding_contract.get("terms", []):
+        if term.get("status") != "pending_embedding_correction":
+            continue
+        corrections.append(
+            {
+                "block_id": term["block_id"],
+                "bond_atoms": term["bond_atoms"],
+                "core_atom": term["core_atom"],
+                "environment_atom": term["environment_atom"],
+                "correction_type": "boundary_bond_embedding",
+                "hamiltonian_embedding_potential": None,
+                "energy_correction_ev": None,
+                "electron_count_correction": None,
+                "status": "not_parameterized",
+            }
+        )
+    return {
+        "version": 1,
+        "correction_level": "placeholder",
+        "num_corrections": len(corrections),
+        "num_unparameterized_corrections": len(corrections),
+        "corrections": corrections,
+    }
+
+
+def write_boundary_corrections_manifest(workdir: str | os.PathLike[str]) -> dict:
+    """Write `boundary_corrections.json` from `embedding_contract.json`."""
+
+    workdir = Path(workdir)
+    contract_path = workdir / "embedding_contract.json"
+    if not contract_path.exists():
+        raise FileNotFoundError(contract_path)
+    payload = build_boundary_correction_plan(json.loads(contract_path.read_text()))
+    (workdir / "boundary_corrections.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return payload
 
 
@@ -1452,6 +1494,7 @@ def validate_ewf_results(
         else ([], [])
     )
     electron_warnings = _read_electron_constraint_warnings(workdir_or_results) if isinstance(workdir_or_results, (str, os.PathLike)) else []
+    correction_warnings = _read_boundary_correction_warnings(workdir_or_results) if isinstance(workdir_or_results, (str, os.PathLike)) else []
     try:
         if isinstance(workdir_or_results, (str, os.PathLike)):
             results = project_results_to_ewf(
@@ -1483,6 +1526,7 @@ def validate_ewf_results(
     errors.extend(embedding_errors)
     warnings.extend(embedding_warnings)
     warnings.extend(electron_warnings)
+    warnings.extend(correction_warnings)
 
     seen_core_atoms = {atom for result in results for atom in result.core_atoms}
     if natoms is not None and len(seen_core_atoms) != natoms:
@@ -1764,6 +1808,21 @@ def _read_electron_constraint_warnings(workdir_or_results) -> list[str]:
     return [
         "electron_constraint.json reports diagnostic electron-count deviation "
         f"{deviation}; chemical-potential correction is not applied."
+    ]
+
+
+def _read_boundary_correction_warnings(workdir_or_results) -> list[str]:
+    workdir = Path(workdir_or_results)
+    path = workdir / "boundary_corrections.json"
+    if not path.exists():
+        return []
+    payload = json.loads(path.read_text())
+    count = int(payload.get("num_unparameterized_corrections", 0))
+    if not count:
+        return []
+    return [
+        f"{count} boundary correction slots are not parameterized; "
+        "Hamiltonian embedding potentials and energy corrections are not applied."
     ]
 
 

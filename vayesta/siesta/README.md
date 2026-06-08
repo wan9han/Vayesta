@@ -79,6 +79,13 @@ derived from `boundary.json`.  Each covered core-boundary bond becomes a pending
 embedding term requiring an embedding potential and an energy correction.  The
 adapter records these required corrections but does not apply them yet.
 
+The workflow then writes `boundary_corrections.json`.  This is a structured
+placeholder plan derived from `embedding_contract.json`: every pending boundary
+embedding term receives a correction slot with null embedding potential, energy
+correction, and electron-count correction fields.  `validation.json` warns about
+these unparameterized slots so downstream consumers cannot silently interpret
+the diagnostic block calculation as a complete embedded result.
+
 The generated `input.fdf` forces the output files needed by the first reader
 contract:
 
@@ -166,6 +173,8 @@ The public collection helpers are:
 - `write_boundary_manifest(workdir, fdf, blocks)`: write those diagnostics to `boundary.json`.
 - `build_embedding_contract(boundary_payload)`: derive pending embedding/boundary correction terms.
 - `write_embedding_contract_manifest(workdir)`: write those terms to `embedding_contract.json`.
+- `build_boundary_correction_plan(embedding_contract)`: derive explicit unparameterized correction slots.
+- `write_boundary_corrections_manifest(workdir)`: write those slots to `boundary_corrections.json`.
 - `project_results_to_ewf(workdir)`: combine `blocks.json` and `results.json` into `SiestaEwfResult` objects.
 - `write_ewf_results_manifest(workdir)`: write `ewf_results.json` with core-owned `SiestaEwfResult` metadata.
 - `assemble_global_matrices(workdir_or_results, natoms=None)`: assemble core-owned sparse DM/H/S entries into compact global orbital numbering.
