@@ -211,6 +211,12 @@ assembled core-owned density and overlap entries.  This is only an electron-coun
 diagnostic for the current collection surface; it is not a chemical-potential or
 electron-number constraint.
 
+After `global_matrices.json` is available, the workflow writes
+`electron_constraint.json`.  It estimates the target valence electron count from
+`ChemicalSpeciesLabel`, compares it with `density_overlap_trace_total`, and
+records the deviation.  The current status is diagnostic only:
+`chemical_potential_status=not_applied`.
+
 Multiple run directories can be compared with:
 
 ```bash
@@ -329,6 +335,8 @@ validation.ncore_atoms=14
 global_matrices.norbitals=102
 global_matrices.nnz=5192
 global_matrices.density_overlap_trace_total=24.26909771038243
+electron_constraint.target_valence_electrons=26.0
+electron_constraint.electron_count_deviation=-1.7309022896175712
 ```
 
 The same two-block case was run through the outer MPI driver with two ranks:
@@ -348,6 +356,8 @@ validation.ok=True
 global_matrices.norbitals=102
 global_matrices.nnz=5192
 global_matrices.density_overlap_trace_total=24.26909771038243
+electron_constraint.target_valence_electrons=26.0
+electron_constraint.electron_count_deviation=-1.7309022896175712
 ```
 
 This proves the current minimum SIESTA backend path:

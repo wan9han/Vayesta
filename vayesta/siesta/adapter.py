@@ -41,6 +41,7 @@ class FdfInput:
     coordinates_start: int
     coordinates_end: int
     species_labels: dict[int, str] = dataclasses.field(default_factory=dict)
+    species_atomic_numbers: dict[int, int] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -405,6 +406,7 @@ class SiestaBlockWorkflow:
             "validation": None,
             "ewf_results": None,
             "global_matrices": None,
+            "electron_constraint": None,
         }
         if self.config.dry_run:
             return payload
@@ -417,6 +419,15 @@ class SiestaBlockWorkflow:
         if validation["ok"]:
             payload["ewf_results"] = write_ewf_results_manifest(self.config.workdir)
             payload["global_matrices"] = write_global_matrices_manifest(self.config.workdir, natoms=self.natoms)
+            payload["electron_constraint"] = write_electron_constraint_manifest(
+                self.config.workdir,
+                self.fdf,
+            )
+            payload["validation"] = write_validation_manifest(
+                self.config.workdir,
+                natoms=self.natoms,
+                min_buffer_atoms=minimum_buffer_atoms(self.config),
+            )
         return payload
 
 
@@ -485,6 +496,7 @@ def parse_fdf(path: str | os.PathLike[str]) -> FdfInput:
     in_coordinates = False
     in_species = False
     species_labels: dict[int, str] = {}
+    species_atomic_numbers: dict[int, int] = {}
     atoms: list[Atom] = []
 
     for lineno, line in enumerate(lines):
@@ -500,7 +512,9 @@ def parse_fdf(path: str | os.PathLike[str]) -> FdfInput:
             fields = stripped.split()
             if len(fields) >= 3:
                 try:
-                    species_labels[int(fields[0])] = fields[2]
+                    species_index = int(fields[0])
+                    species_atomic_numbers[species_index] = int(fields[1])
+                    species_labels[species_index] = fields[2]
                 except ValueError:
                     pass
             continue
@@ -532,7 +546,7 @@ def parse_fdf(path: str | os.PathLike[str]) -> FdfInput:
         raise ValueError("FDF input has no AtomicCoordinatesAndAtomicSpecies block")
     if not atoms:
         raise ValueError("FDF coordinate block is empty")
-    return FdfInput(tuple(lines), tuple(atoms), block_start, block_end, species_labels)
+    return FdfInput(tuple(lines), tuple(atoms), block_start, block_end, species_labels, species_atomic_numbers)
 
 
 def partition_contiguous_atoms(
@@ -1376,6 +1390,43 @@ def write_global_matrices_manifest(
     return payload
 
 
+def build_electron_constraint(fdf: FdfInput, global_matrices_metadata: dict) -> dict:
+    """Build a diagnostic electron-number constraint from valence counts and Tr(D S)."""
+
+    target = estimate_valence_electron_count(fdf)
+    observed = global_matrices_metadata.get("density_overlap_trace_total")
+    deviation = None if observed is None else float(observed - target)
+    return {
+        "constraint_level": "diagnostic",
+        "target_valence_electrons": float(target),
+        "observed_density_overlap_trace": observed,
+        "electron_count_deviation": deviation,
+        "chemical_potential_status": "not_applied",
+        "policy": "report_only_no_mu_update",
+    }
+
+
+def write_electron_constraint_manifest(
+    workdir: str | os.PathLike[str],
+    fdf: FdfInput,
+) -> dict:
+    """Write `electron_constraint.json` using `global_matrices.json`."""
+
+    workdir = Path(workdir)
+    global_path = workdir / "global_matrices.json"
+    if not global_path.exists():
+        raise FileNotFoundError(global_path)
+    payload = build_electron_constraint(fdf, json.loads(global_path.read_text()))
+    (workdir / "electron_constraint.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
+def estimate_valence_electron_count(fdf: FdfInput) -> int:
+    """Estimate total valence electrons from FDF species atomic numbers."""
+
+    return sum(_valence_electrons(fdf.species_atomic_numbers.get(atom.species), fdf.species_labels.get(atom.species)) for atom in fdf.atoms)
+
+
 def validate_ewf_results(
     workdir_or_results: str | os.PathLike[str] | Sequence[SiestaEwfResult],
     natoms: int | None = None,
@@ -1400,6 +1451,7 @@ def validate_ewf_results(
         if isinstance(workdir_or_results, (str, os.PathLike))
         else ([], [])
     )
+    electron_warnings = _read_electron_constraint_warnings(workdir_or_results) if isinstance(workdir_or_results, (str, os.PathLike)) else []
     try:
         if isinstance(workdir_or_results, (str, os.PathLike)):
             results = project_results_to_ewf(
@@ -1430,6 +1482,7 @@ def validate_ewf_results(
     errors.extend(boundary_errors)
     errors.extend(embedding_errors)
     warnings.extend(embedding_warnings)
+    warnings.extend(electron_warnings)
 
     seen_core_atoms = {atom for result in results for atom in result.core_atoms}
     if natoms is not None and len(seen_core_atoms) != natoms:
@@ -1662,6 +1715,56 @@ def _covalent_radius(fdf: FdfInput, species: int) -> float:
         return radii[label]
     fallback = {1: 0.76, 2: 0.31}
     return fallback.get(species, 0.8)
+
+
+def _valence_electrons(atomic_number: int | None, label: str | None) -> int:
+    if atomic_number is not None:
+        table = {
+            1: 1,
+            5: 3,
+            6: 4,
+            7: 5,
+            8: 6,
+            9: 7,
+            14: 4,
+            15: 5,
+            16: 6,
+            17: 7,
+        }
+        if atomic_number in table:
+            return table[atomic_number]
+    label_table = {
+        "H": 1,
+        "B": 3,
+        "C": 4,
+        "N": 5,
+        "O": 6,
+        "F": 7,
+        "Si": 4,
+        "P": 5,
+        "S": 6,
+        "Cl": 7,
+    }
+    if label:
+        normalized = label.strip().capitalize()
+        if normalized in label_table:
+            return label_table[normalized]
+    return 0
+
+
+def _read_electron_constraint_warnings(workdir_or_results) -> list[str]:
+    workdir = Path(workdir_or_results)
+    path = workdir / "electron_constraint.json"
+    if not path.exists():
+        return []
+    payload = json.loads(path.read_text())
+    deviation = payload.get("electron_count_deviation")
+    if deviation is None:
+        return []
+    return [
+        "electron_constraint.json reports diagnostic electron-count deviation "
+        f"{deviation}; chemical-potential correction is not applied."
+    ]
 
 
 def _summarize_one_block(block: dict, result: dict | None, scheduled_rank: int | None = None) -> dict:

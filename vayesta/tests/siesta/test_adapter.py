@@ -295,6 +295,41 @@ def test_embedding_contract_manifest_records_pending_boundary_corrections(tmp_pa
     assert json.loads((tmp_path / "embedding_contract.json").read_text()) == payload
 
 
+def test_electron_constraint_manifest_reports_valence_deviation(tmp_path):
+    fdf_path = tmp_path / "methane.fdf"
+    fdf_path.write_text(
+        "\n".join(
+            [
+                "SystemLabel methane",
+                "NumberOfAtoms 2",
+                "NumberOfSpecies 2",
+                "%block ChemicalSpeciesLabel",
+                "1 6 C",
+                "2 1 H",
+                "%endblock ChemicalSpeciesLabel",
+                "%block AtomicCoordinatesAndAtomicSpecies",
+                "0.0 0.0 0.0 1",
+                "1.0 0.0 0.0 2",
+                "%endblock AtomicCoordinatesAndAtomicSpecies",
+            ]
+        )
+        + "\n"
+    )
+    fdf = adapter.parse_fdf(fdf_path)
+    (tmp_path / "global_matrices.json").write_text(json.dumps({"density_overlap_trace_total": 4.5}))
+
+    payload = adapter.write_electron_constraint_manifest(tmp_path, fdf)
+
+    assert fdf.species_atomic_numbers == {1: 6, 2: 1}
+    assert adapter.estimate_valence_electron_count(fdf) == 5
+    assert payload["constraint_level"] == "diagnostic"
+    assert payload["target_valence_electrons"] == 5.0
+    assert payload["observed_density_overlap_trace"] == 4.5
+    assert payload["electron_count_deviation"] == -0.5
+    assert payload["chemical_potential_status"] == "not_applied"
+    assert json.loads((tmp_path / "electron_constraint.json").read_text()) == payload
+
+
 def test_read_run_config_from_environment(tmp_path):
     config = adapter.read_run_config(
         {
@@ -984,6 +1019,9 @@ def test_validate_ewf_results_rejects_uncovered_boundary_bonds(tmp_path):
             }
         )
     )
+    (tmp_path / "electron_constraint.json").write_text(
+        json.dumps({"electron_count_deviation": -0.5})
+    )
 
     report = adapter.validate_ewf_results(tmp_path, natoms=1, require_matrices=False)
 
@@ -991,6 +1029,7 @@ def test_validate_ewf_results_rejects_uncovered_boundary_bonds(tmp_path):
     assert "boundary bond 0-1 is not covered" in report.errors[0]
     assert "embedding term [0, 1] has uncovered boundary" in report.errors[1]
     assert "1 boundary embedding terms require" in report.warnings[0]
+    assert "electron-count deviation -0.5" in report.warnings[1]
 
 
 def test_assemble_global_matrices_from_core_owned_blocks(tmp_path):
