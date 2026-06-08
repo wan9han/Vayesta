@@ -253,6 +253,48 @@ def test_infer_bonds_and_boundary_manifest_detects_buffer_coverage(tmp_path):
     assert [(bond["atom_i"], bond["atom_j"]) for bond in uncovered] == [(0, 2)]
 
 
+def test_embedding_contract_manifest_records_pending_boundary_corrections(tmp_path):
+    boundary_payload = {
+        "blocks": [
+            {
+                "block_id": 0,
+                "core_atom_range": [0, 1],
+                "boundary_bonds": [
+                    {
+                        "atom_i": 0,
+                        "atom_j": 1,
+                        "covered_by_input": True,
+                        "distance_angstrom": 1.5,
+                        "species_i": "C",
+                        "species_j": "C",
+                    },
+                    {
+                        "atom_i": 0,
+                        "atom_j": 2,
+                        "covered_by_input": False,
+                        "distance_angstrom": 1.1,
+                        "species_i": "C",
+                        "species_j": "H",
+                    },
+                ],
+            }
+        ]
+    }
+    (tmp_path / "boundary.json").write_text(json.dumps(boundary_payload))
+
+    payload = adapter.write_embedding_contract_manifest(tmp_path)
+
+    assert payload["embedding_level"] == "boundary-buffer-contract"
+    assert payload["matrix_ownership"] == "core_owned"
+    assert payload["num_terms"] == 2
+    assert payload["num_pending_embedding_terms"] == 1
+    assert payload["num_uncovered_boundary_terms"] == 1
+    assert payload["terms"][0]["status"] == "pending_embedding_correction"
+    assert payload["terms"][0]["requires_embedding_potential"] is True
+    assert payload["terms"][1]["status"] == "invalid_uncovered_boundary"
+    assert json.loads((tmp_path / "embedding_contract.json").read_text()) == payload
+
+
 def test_read_run_config_from_environment(tmp_path):
     config = adapter.read_run_config(
         {
@@ -928,11 +970,27 @@ def test_validate_ewf_results_rejects_uncovered_boundary_bonds(tmp_path):
             }
         )
     )
+    (tmp_path / "embedding_contract.json").write_text(
+        json.dumps(
+            {
+                "num_pending_embedding_terms": 1,
+                "terms": [
+                    {
+                        "block_id": 0,
+                        "bond_atoms": [0, 1],
+                        "status": "invalid_uncovered_boundary",
+                    }
+                ],
+            }
+        )
+    )
 
     report = adapter.validate_ewf_results(tmp_path, natoms=1, require_matrices=False)
 
     assert report.ok is False
     assert "boundary bond 0-1 is not covered" in report.errors[0]
+    assert "embedding term [0, 1] has uncovered boundary" in report.errors[1]
+    assert "1 boundary embedding terms require" in report.warnings[0]
 
 
 def test_assemble_global_matrices_from_core_owned_blocks(tmp_path):
@@ -1331,6 +1389,7 @@ def test_prepare_siesta_workflow_runs_dry_rank_and_finalize(tmp_path):
     assert (config.workdir / "blocks.json").exists()
     assert (config.workdir / "schedule.json").exists()
     assert (config.workdir / "boundary.json").exists()
+    assert (config.workdir / "embedding_contract.json").exists()
     assert (config.workdir / "result_rank_0000.json").exists()
     assert payload["results"] == []
     assert payload["run_summary"]["scheduled_ranks"] == [0, 1]

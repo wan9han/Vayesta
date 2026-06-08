@@ -74,6 +74,11 @@ core boundary, and records whether the other end of each boundary bond is
 covered by the SIESTA input/buffer atoms.  `validation.json` treats uncovered
 boundary bonds as errors.
 
+It also writes `embedding_contract.json`, a conservative boundary contract
+derived from `boundary.json`.  Each covered core-boundary bond becomes a pending
+embedding term requiring an embedding potential and an energy correction.  The
+adapter records these required corrections but does not apply them yet.
+
 The generated `input.fdf` forces the output files needed by the first reader
 contract:
 
@@ -159,6 +164,8 @@ The public collection helpers are:
 - `infer_bonds(fdf)`: infer covalent bonds from coordinates and species labels.
 - `analyze_block_boundaries(fdf, blocks)`: report core-boundary bonds and buffer coverage.
 - `write_boundary_manifest(workdir, fdf, blocks)`: write those diagnostics to `boundary.json`.
+- `build_embedding_contract(boundary_payload)`: derive pending embedding/boundary correction terms.
+- `write_embedding_contract_manifest(workdir)`: write those terms to `embedding_contract.json`.
 - `project_results_to_ewf(workdir)`: combine `blocks.json` and `results.json` into `SiestaEwfResult` objects.
 - `write_ewf_results_manifest(workdir)`: write `ewf_results.json` with core-owned `SiestaEwfResult` metadata.
 - `assemble_global_matrices(workdir_or_results, natoms=None)`: assemble core-owned sparse DM/H/S entries into compact global orbital numbering.
@@ -334,6 +341,7 @@ result_rank_0000.json and result_rank_0001.json written
 schedule.block_owner_rank={"0": 0, "1": 1}
 boundary.num_boundary_bonds=4
 boundary.num_uncovered_boundary_bonds=0
+embedding_contract.num_pending_embedding_terms=4
 run_summary.ranks_with_results=[0, 1]
 run_summary.max_block_wall_time_seconds=2.279
 validation.ok=True

@@ -377,6 +377,7 @@ class SiestaBlockWorkflow:
             procs_per_machine=self.config.procs_per_machine,
         )
         write_boundary_manifest(self.config.workdir, self.fdf, self.blocks)
+        write_embedding_contract_manifest(self.config.workdir)
         return block_dirs
 
     def assigned_blocks(self, machine_id: int, local_rank: int) -> list[SiestaBlock]:
@@ -786,6 +787,61 @@ def write_boundary_manifest(
     workdir = Path(workdir)
     payload = analyze_block_boundaries(fdf, blocks)
     (workdir / "boundary.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
+def build_embedding_contract(boundary_payload: dict) -> dict:
+    """Build the minimal boundary embedding contract from boundary diagnostics."""
+
+    terms = []
+    for block in boundary_payload.get("blocks", []):
+        core_start, core_end = block["core_atom_range"]
+        for bond in block.get("boundary_bonds", []):
+            atom_i = int(bond["atom_i"])
+            atom_j = int(bond["atom_j"])
+            atom_i_core = core_start <= atom_i < core_end
+            core_atom = atom_i if atom_i_core else atom_j
+            environment_atom = atom_j if atom_i_core else atom_i
+            covered = bool(bond.get("covered_by_input"))
+            terms.append(
+                {
+                    "block_id": int(block["block_id"]),
+                    "bond_atoms": [atom_i, atom_j],
+                    "core_atom": core_atom,
+                    "environment_atom": environment_atom,
+                    "covered_by_input": covered,
+                    "requires_embedding_potential": covered,
+                    "requires_energy_correction": covered,
+                    "status": "pending_embedding_correction" if covered else "invalid_uncovered_boundary",
+                    "distance_angstrom": bond.get("distance_angstrom"),
+                    "species": [bond.get("species_i"), bond.get("species_j")],
+                }
+            )
+    uncovered = [term for term in terms if not term["covered_by_input"]]
+    pending = [term for term in terms if term["status"] == "pending_embedding_correction"]
+    return {
+        "version": 1,
+        "embedding_level": "boundary-buffer-contract",
+        "matrix_ownership": "core_owned",
+        "buffer_policy": "boundary_atoms_must_be_present_in_input",
+        "electron_policy": "diagnostic_density_overlap_trace_only",
+        "energy_policy": "diagnostic_block_sum_no_double_counting_correction",
+        "num_terms": len(terms),
+        "num_pending_embedding_terms": len(pending),
+        "num_uncovered_boundary_terms": len(uncovered),
+        "terms": terms,
+    }
+
+
+def write_embedding_contract_manifest(workdir: str | os.PathLike[str]) -> dict:
+    """Write `embedding_contract.json` from an existing `boundary.json`."""
+
+    workdir = Path(workdir)
+    boundary_path = workdir / "boundary.json"
+    if not boundary_path.exists():
+        raise FileNotFoundError(boundary_path)
+    payload = build_embedding_contract(json.loads(boundary_path.read_text()))
+    (workdir / "embedding_contract.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return payload
 
 
@@ -1339,6 +1395,11 @@ def validate_ewf_results(
     errors: list[str] = []
     warnings: list[str] = []
     boundary_errors = _read_boundary_errors(workdir_or_results) if isinstance(workdir_or_results, (str, os.PathLike)) else []
+    embedding_errors, embedding_warnings = (
+        _read_embedding_contract_messages(workdir_or_results)
+        if isinstance(workdir_or_results, (str, os.PathLike))
+        else ([], [])
+    )
     try:
         if isinstance(workdir_or_results, (str, os.PathLike)):
             results = project_results_to_ewf(
@@ -1367,6 +1428,8 @@ def validate_ewf_results(
             energy_policy="invalid",
         )
     errors.extend(boundary_errors)
+    errors.extend(embedding_errors)
+    warnings.extend(embedding_warnings)
 
     seen_core_atoms = {atom for result in results for atom in result.core_atoms}
     if natoms is not None and len(seen_core_atoms) != natoms:
@@ -1554,6 +1617,27 @@ def _read_boundary_errors(workdir_or_results) -> list[str]:
         f"Block {bond['block_id']} boundary bond {bond['atom_i']}-{bond['atom_j']} is not covered by input buffer"
         for bond in uncovered
     ]
+
+
+def _read_embedding_contract_messages(workdir_or_results) -> tuple[list[str], list[str]]:
+    workdir = Path(workdir_or_results)
+    contract_path = workdir / "embedding_contract.json"
+    if not contract_path.exists():
+        return [], []
+    payload = json.loads(contract_path.read_text())
+    errors = [
+        f"Block {term['block_id']} embedding term {term['bond_atoms']} has uncovered boundary"
+        for term in payload.get("terms", [])
+        if term.get("status") == "invalid_uncovered_boundary"
+    ]
+    pending = int(payload.get("num_pending_embedding_terms", 0))
+    warnings = []
+    if pending:
+        warnings.append(
+            f"{pending} boundary embedding terms require embedding potential and energy correction; "
+            "current adapter records the contract but does not apply those corrections."
+        )
+    return errors, warnings
 
 
 def _atom_distance(atom_i: Atom, atom_j: Atom) -> float:
