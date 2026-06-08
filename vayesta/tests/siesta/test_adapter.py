@@ -479,6 +479,54 @@ def test_electron_constraint_manifest_reports_valence_deviation(tmp_path):
     assert json.loads((tmp_path / "electron_constraint.json").read_text()) == payload
 
 
+def test_physical_readiness_report_blocks_diagnostic_backend_only_results(tmp_path):
+    (tmp_path / "validation.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "energy_policy": "diagnostic_block_sum_not_embedded_total",
+            }
+        )
+    )
+    (tmp_path / "embedding_contract.json").write_text(json.dumps({"num_pending_embedding_terms": 2}))
+    (tmp_path / "boundary_corrections.json").write_text(json.dumps({"num_unparameterized_corrections": 2}))
+    (tmp_path / "electron_constraint.json").write_text(
+        json.dumps(
+            {
+                "chemical_potential_status": "not_applied",
+                "electron_count_deviation": -0.25,
+            }
+        )
+    )
+    (tmp_path / "global_matrices.json").write_text(json.dumps({"density_overlap_trace_total": 9.75}))
+
+    payload = adapter.write_physical_readiness_manifest(tmp_path)
+
+    assert payload["backend_artifacts_ready"] is True
+    assert payload["embedded_observable_ready"] is False
+    assert payload["status"] == "diagnostic_backend_only"
+    assert "2 boundary embedding terms" in payload["blockers"][0]
+    assert "2 boundary correction slots" in payload["blockers"][1]
+    assert "chemical-potential constraint is not applied" in payload["blockers"][2]
+    assert payload["diagnostic_outputs"]["density_overlap_trace_total"] == 9.75
+    assert payload["diagnostic_outputs"]["electron_count_deviation"] == -0.25
+    assert json.loads((tmp_path / "physical_readiness.json").read_text()) == payload
+
+
+def test_physical_readiness_report_allows_completed_embedding_contract(tmp_path):
+    (tmp_path / "validation.json").write_text(json.dumps({"ok": True}))
+    (tmp_path / "embedding_contract.json").write_text(json.dumps({"num_pending_embedding_terms": 0}))
+    (tmp_path / "boundary_corrections.json").write_text(json.dumps({"num_unparameterized_corrections": 0}))
+    (tmp_path / "electron_constraint.json").write_text(json.dumps({"chemical_potential_status": "applied"}))
+
+    payload = adapter.build_physical_readiness_report(tmp_path)
+
+    assert payload["backend_artifacts_ready"] is True
+    assert payload["embedded_observable_ready"] is True
+    assert payload["status"] == "embedded_observable_ready"
+    assert payload["blockers"] == []
+
+
 def test_read_run_config_from_environment(tmp_path):
     config = adapter.read_run_config(
         {

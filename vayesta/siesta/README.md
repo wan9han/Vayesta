@@ -95,6 +95,13 @@ correction, and electron-count correction fields.  `validation.json` warns about
 these unparameterized slots so downstream consumers cannot silently interpret
 the diagnostic block calculation as a complete embedded result.
 
+For the same reason, real runs also write `physical_readiness.json`.  This
+manifest separates engineering readiness from physical readiness:
+`backend_artifacts_ready=true` means the SIESTA block outputs passed the current
+adapter checks, while `embedded_observable_ready=false` means the result still
+lacks embedding potentials, boundary corrections, or an applied electron-number
+constraint.
+
 The generated `input.fdf` forces the output files needed by the first reader
 contract:
 
@@ -184,6 +191,8 @@ The public collection helpers are:
 - `write_embedding_contract_manifest(workdir)`: write those terms to `embedding_contract.json`.
 - `build_boundary_correction_plan(embedding_contract)`: derive explicit unparameterized correction slots.
 - `write_boundary_corrections_manifest(workdir)`: write those slots to `boundary_corrections.json`.
+- `build_physical_readiness_report(workdir)`: report backend readiness versus final embedded-observable readiness.
+- `write_physical_readiness_manifest(workdir)`: write that report to `physical_readiness.json`.
 - `project_results_to_ewf(workdir)`: combine `blocks.json` and `results.json` into `SiestaEwfResult` objects.
 - `attach_siesta_results_to_fragments(fragments, results)`: attach projected SIESTA results to existing Vayesta fragments by `siesta_block_id`.
 - `load_siesta_results_to_fragments(workdir, fragments)`: project a run directory and attach its results to fragments.

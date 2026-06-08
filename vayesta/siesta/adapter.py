@@ -408,6 +408,7 @@ class SiestaBlockWorkflow:
             "ewf_results": None,
             "global_matrices": None,
             "electron_constraint": None,
+            "physical_readiness": None,
         }
         if self.config.dry_run:
             return payload
@@ -429,6 +430,8 @@ class SiestaBlockWorkflow:
                 natoms=self.natoms,
                 min_buffer_atoms=minimum_buffer_atoms(self.config),
             )
+        if (self.config.workdir / "validation.json").exists():
+            payload["physical_readiness"] = write_physical_readiness_manifest(self.config.workdir)
         return payload
 
 
@@ -1516,6 +1519,58 @@ def write_electron_constraint_manifest(
     return payload
 
 
+def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
+    """Report whether SIESTA block artifacts are ready for physical EWF use."""
+
+    workdir = Path(workdir)
+    validation = _read_optional_json(workdir / "validation.json") or {}
+    embedding = _read_optional_json(workdir / "embedding_contract.json") or {}
+    corrections = _read_optional_json(workdir / "boundary_corrections.json") or {}
+    electron = _read_optional_json(workdir / "electron_constraint.json") or {}
+    global_matrices = _read_optional_json(workdir / "global_matrices.json") or {}
+
+    backend_ready = bool(validation.get("ok"))
+    blockers = []
+    if not backend_ready:
+        blockers.append("SIESTA backend artifacts failed validation or validation.json is missing")
+
+    pending_embedding = int(embedding.get("num_pending_embedding_terms", 0))
+    if pending_embedding:
+        blockers.append(f"{pending_embedding} boundary embedding terms do not have embedding potentials")
+
+    unparameterized = int(corrections.get("num_unparameterized_corrections", 0))
+    if unparameterized:
+        blockers.append(f"{unparameterized} boundary correction slots are not parameterized")
+
+    if backend_ready and not electron:
+        blockers.append("electron_constraint.json is missing")
+    elif electron and electron.get("chemical_potential_status") != "applied":
+        blockers.append("global electron-number or chemical-potential constraint is not applied")
+
+    embedded_ready = backend_ready and not blockers
+    return {
+        "version": 1,
+        "backend_artifacts_ready": backend_ready,
+        "embedded_observable_ready": embedded_ready,
+        "status": "embedded_observable_ready" if embedded_ready else "diagnostic_backend_only",
+        "blockers": blockers,
+        "diagnostic_outputs": {
+            "energy_policy": validation.get("energy_policy"),
+            "density_overlap_trace_total": global_matrices.get("density_overlap_trace_total"),
+            "electron_count_deviation": electron.get("electron_count_deviation"),
+        },
+    }
+
+
+def write_physical_readiness_manifest(workdir: str | os.PathLike[str]) -> dict:
+    """Write `physical_readiness.json` for downstream EWF consumers."""
+
+    workdir = Path(workdir)
+    payload = build_physical_readiness_report(workdir)
+    (workdir / "physical_readiness.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
 def estimate_valence_electron_count(fdf: FdfInput) -> int:
     """Estimate total valence electrons from FDF species atomic numbers."""
 
@@ -2335,6 +2390,12 @@ def _read_json_list(path: Path) -> list[dict]:
     if not isinstance(payload, list):
         raise ValueError(f"{path} does not contain a JSON list")
     return payload
+
+
+def _read_optional_json(path: Path):
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
 
 
 def _option_key(lowered_line: str) -> str:
