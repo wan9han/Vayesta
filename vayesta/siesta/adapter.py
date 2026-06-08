@@ -1748,6 +1748,8 @@ def validate_ewf_results(
         solver_used = {str(solver).upper() for solver in elsi_metadata.get("solver_used", [])}
         if elsi_metadata and solver_used != {"NTPOLY"}:
             errors.append(f"Block {result.block_id} used ELSI solver {sorted(solver_used)}, expected ['NTPOLY']")
+        if elsi_metadata and elsi_metadata.get("complete") is False:
+            warnings.append(f"Block {result.block_id} has an incomplete ELSI log; solver metadata was read from complete records only")
         nt_method = elsi_metadata.get("last_solver_settings", {}).get("nt_method")
         if nt_method is not None and int(nt_method) != 2:
             errors.append(f"Block {result.block_id} used NTPoly method {nt_method}, expected TRS2 method 2")
@@ -2444,7 +2446,14 @@ def _read_matrix_metadata(dm_path: Path | None, hsx_path: Path | None) -> dict[s
 def _read_elsi_log_metadata(path: Path) -> dict:
     if not path.exists():
         return {}
-    payload = json.loads(path.read_text())
+    complete = True
+    parse_error = None
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        complete = False
+        parse_error = str(exc)
+        payload = _read_partial_elsi_log_records(path.read_text())
     if not isinstance(payload, list):
         return {}
     solver_chosen = sorted({entry.get("solver_chosen") for entry in payload if entry.get("solver_chosen")})
@@ -2452,12 +2461,37 @@ def _read_elsi_log_metadata(path: Path) -> dict:
     last_settings = {}
     if payload:
         last_settings = payload[-1].get("solver_settings", {}) or {}
-    return {
+    metadata = {
+        "complete": complete,
         "num_records": len(payload),
         "solver_chosen": solver_chosen,
         "solver_used": solver_used,
         "last_solver_settings": last_settings,
     }
+    if parse_error is not None:
+        metadata["parse_error"] = parse_error
+    return metadata
+
+
+def _read_partial_elsi_log_records(text: str) -> list[dict]:
+    decoder = json.JSONDecoder()
+    records = []
+    cursor = text.find("[")
+    if cursor < 0:
+        return records
+    cursor += 1
+    while cursor < len(text):
+        while cursor < len(text) and text[cursor] in " \t\r\n,":
+            cursor += 1
+        if cursor >= len(text) or text[cursor] == "]":
+            break
+        try:
+            item, cursor = decoder.raw_decode(text, cursor)
+        except json.JSONDecodeError:
+            break
+        if isinstance(item, dict):
+            records.append(item)
+    return records
 
 
 def _read_core_matrix_metadata(

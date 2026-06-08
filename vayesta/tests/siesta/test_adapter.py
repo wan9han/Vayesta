@@ -775,6 +775,7 @@ def test_read_siesta_output_with_scalar_and_matrix_paths(tmp_path):
     assert result.matrix_metadata["hamiltonian_overlap"]["natoms"] == 2
     assert result.matrix_metadata["hamiltonian_overlap"]["double_precision"] is True
     assert result.matrix_metadata["elsi"]["solver_used"] == ["NTPOLY"]
+    assert result.matrix_metadata["elsi"]["complete"] is True
     assert result.matrix_metadata["elsi"]["last_solver_settings"]["nt_method"] == 2
     assert result.run_diagnostics["num_scf_steps"] == 0
     assert result.run_diagnostics["convergence_reason"] == "scf_converged"
@@ -813,6 +814,42 @@ def test_read_siesta_output_parses_scf_energy_and_orbital_ranges(tmp_path):
     assert result.run_diagnostics["convergence_reason"] == "max_scf_iterations_or_required_convergence_not_met"
     assert result.atom_orbital_ranges == {10: (0, 2), 11: (2, 3)}
     assert result.to_metadata()["atom_orbital_ranges"] == {"10": [0, 2], "11": [2, 3]}
+
+
+def test_read_siesta_output_salvages_truncated_elsi_log(tmp_path):
+    block_dir = tmp_path / "block_0000"
+    block_dir.mkdir()
+    (block_dir / "block.json").write_text(json.dumps({"block_id": 0}))
+    (block_dir / "siesta.out").write_text(
+        "\n".join(
+            [
+                "scf:    1    -10.0    -20.0    -20.0  0.1 0.2 0.3",
+                "scf:    2    -11.0    -21.0    -21.0  0.1 0.2 0.3",
+            ]
+        )
+    )
+    (block_dir / "elsi_log.json").write_text(
+        "[\n"
+        + json.dumps(
+            {
+                "solver_chosen": "NTPOLY",
+                "solver_used": "NTPOLY",
+                "solver_settings": {"nt_method": 2},
+            }
+        )
+        + ",\n"
+        + '{"solver_chosen": "NTPOLY"'
+    )
+
+    result = adapter.read_siesta_output(block_dir)
+
+    elsi = result.matrix_metadata["elsi"]
+    assert elsi["complete"] is False
+    assert elsi["num_records"] == 1
+    assert elsi["solver_used"] == ["NTPOLY"]
+    assert elsi["last_solver_settings"]["nt_method"] == 2
+    assert "parse_error" in elsi
+    assert result.run_diagnostics["num_scf_steps"] == 2
 
 
 def test_read_hsx_sparse_reads_rows_columns_hamiltonian_and_overlap(tmp_path):
