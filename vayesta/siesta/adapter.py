@@ -1717,6 +1717,11 @@ def _render_block_fdf(fdf: FdfInput, atoms: Sequence[Atom], block_id: int) -> st
     out: list[str] = []
     natoms = len(atoms)
     forced_options = {
+        "solutionmethod": "SolutionMethod     ELSI",
+        "elsisolver": "ELSI.Solver        ntpoly",
+        "elsintpolymethod": "ELSI.NTPoly.Method 2",
+        "elsintpolyfilter": "ELSI.NTPoly.Filter 1.0e-9",
+        "elsintpolytolerance": "ELSI.NTPoly.Tolerance 1.0e-6",
         "writedm": "WriteDM          true",
         "savehs": "SaveHS           true",
         "writeorbitalindex": "WriteOrbitalIndex true",
@@ -1740,7 +1745,7 @@ def _render_block_fdf(fdf: FdfInput, atoms: Sequence[Atom], block_id: int) -> st
                 out.append(f"    {atom.x:16.9f} {atom.y:16.9f} {atom.z:16.9f}    {atom.species}")
     missing_options = [value for key, value in forced_options.items() if key not in seen_options]
     if missing_options:
-        out.extend(["", "# Required block outputs for the EWF/SIESTA adapter.", *missing_options])
+        out.extend(["", "# Required solver and block outputs for the EWF/SIESTA adapter.", *missing_options])
     return "\n".join(out) + "\n"
 
 

@@ -306,6 +306,7 @@ def test_generate_block_input_forces_required_output_files(tmp_path):
                 "SystemLabel      global",
                 "NumberOfAtoms    2",
                 "NumberOfSpecies  1",
+                "SolutionMethod   diagon",
                 "SaveHS           false",
                 "WriteDM          false",
                 "%block AtomicCoordinatesAndAtomicSpecies",
@@ -323,6 +324,11 @@ def test_generate_block_input_forces_required_output_files(tmp_path):
     input_text = (generated[0] / "input.fdf").read_text()
 
     assert "SystemLabel      block_0000" in input_text
+    assert "SolutionMethod     ELSI" in input_text
+    assert "ELSI.Solver        ntpoly" in input_text
+    assert "ELSI.NTPoly.Method 2" in input_text
+    assert "ELSI.NTPoly.Filter 1.0e-9" in input_text
+    assert "ELSI.NTPoly.Tolerance 1.0e-6" in input_text
     assert "SaveHS           true" in input_text
     assert "WriteDM          true" in input_text
     assert "WriteOrbitalIndex true" in input_text

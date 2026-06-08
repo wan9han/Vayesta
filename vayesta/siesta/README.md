@@ -102,12 +102,23 @@ adapter checks, while `embedded_observable_ready=false` means the result still
 lacks embedding potentials, boundary corrections, or an applied electron-number
 constraint.
 
-The generated `input.fdf` forces the output files needed by the first reader
-contract:
+The generated `input.fdf` forces the intended SIESTA/ELSI solver path and the
+output files needed by the first reader contract:
 
+- `SolutionMethod ELSI`
+- `ELSI.Solver ntpoly`
+- `ELSI.NTPoly.Method 2`
+- `ELSI.NTPoly.Filter 1.0e-9`
+- `ELSI.NTPoly.Tolerance 1.0e-6`
 - `WriteDM true`
 - `SaveHS true`
 - `WriteOrbitalIndex true`
+
+This keeps each local SIESTA block on the ELSI -> NTPoly density-matrix
+purification path instead of the ELSI default ELPA diagonalization path.  In the
+bundled NTPoly source, `TRS2` is the density-matrix purification routine; the
+adapter records the requested NTPoly method in the generated input and validates
+the actually used ELSI solver from `elsi_log.json` during smoke testing.
 
 `read_siesta_output` currently returns the scalar text-output contract:
 
