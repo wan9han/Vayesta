@@ -1213,6 +1213,9 @@ def read_siesta_output(block_dir: str | os.PathLike[str]) -> SiestaResult:
     hamiltonian_matrix_path = _first_existing(block_dir, _HAMILTONIAN_MATRIX_CANDIDATES, block_id)
     overlap_matrix_path = _first_existing(block_dir, _OVERLAP_MATRIX_CANDIDATES, block_id)
     matrix_metadata = _read_matrix_metadata(density_matrix_path, hamiltonian_matrix_path)
+    elsi_metadata = _read_elsi_log_metadata(block_dir / "elsi_log.json")
+    if elsi_metadata:
+        matrix_metadata["elsi"] = elsi_metadata
     if not output_path.exists():
         return SiestaResult(
             block_id=block_id,
@@ -1676,6 +1679,10 @@ def validate_ewf_results(
             errors.append(f"Block {result.block_id} has no density matrix")
         if result.hamiltonian_matrix_path is None or result.overlap_matrix_path is None:
             errors.append(f"Block {result.block_id} has no HSX Hamiltonian/overlap matrix")
+        elsi_metadata = result.matrix_metadata.get("elsi", {})
+        solver_used = {str(solver).upper() for solver in elsi_metadata.get("solver_used", [])}
+        if elsi_metadata and solver_used != {"NTPOLY"}:
+            errors.append(f"Block {result.block_id} used ELSI solver {sorted(solver_used)}, expected ['NTPOLY']")
         if min_buffer_atoms > 0 and _is_internal_block(result, natoms) and len(result.buffer_atoms) < min_buffer_atoms:
             warnings.append(
                 f"Block {result.block_id} has {len(result.buffer_atoms)} buffer atoms; "
@@ -2321,6 +2328,25 @@ def _read_matrix_metadata(dm_path: Path | None, hsx_path: Path | None) -> dict[s
     if hsx_path is not None:
         metadata["hamiltonian_overlap"] = read_hsx_metadata(hsx_path).to_metadata()
     return metadata
+
+
+def _read_elsi_log_metadata(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    payload = json.loads(path.read_text())
+    if not isinstance(payload, list):
+        return {}
+    solver_chosen = sorted({entry.get("solver_chosen") for entry in payload if entry.get("solver_chosen")})
+    solver_used = sorted({entry.get("solver_used") for entry in payload if entry.get("solver_used")})
+    last_settings = {}
+    if payload:
+        last_settings = payload[-1].get("solver_settings", {}) or {}
+    return {
+        "num_records": len(payload),
+        "solver_chosen": solver_chosen,
+        "solver_used": solver_used,
+        "last_solver_settings": last_settings,
+    }
 
 
 def _read_core_matrix_metadata(

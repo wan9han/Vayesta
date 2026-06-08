@@ -714,6 +714,17 @@ def test_read_siesta_output_with_scalar_and_matrix_paths(tmp_path):
     )
     _write_minimal_dm(block_dir / "block_0003.DM", norbitals=3, nspin=1)
     _write_minimal_hsx(block_dir / "block_0003.HSX", natoms=2, norbitals=3, nspin=1)
+    (block_dir / "elsi_log.json").write_text(
+        json.dumps(
+            [
+                {
+                    "solver_chosen": "NTPOLY",
+                    "solver_used": "NTPOLY",
+                    "solver_settings": {"nt_method": 2},
+                }
+            ]
+        )
+    )
     (block_dir / "block_0003.ORB_INDX").write_text(
         "\n".join(
             [
@@ -741,6 +752,8 @@ def test_read_siesta_output_with_scalar_and_matrix_paths(tmp_path):
     assert result.matrix_metadata["density"]["norbitals"] == 3
     assert result.matrix_metadata["hamiltonian_overlap"]["natoms"] == 2
     assert result.matrix_metadata["hamiltonian_overlap"]["double_precision"] is True
+    assert result.matrix_metadata["elsi"]["solver_used"] == ["NTPOLY"]
+    assert result.matrix_metadata["elsi"]["last_solver_settings"]["nt_method"] == 2
 
 
 def test_read_siesta_output_parses_scf_energy_and_orbital_ranges(tmp_path):
@@ -1260,6 +1273,32 @@ def test_validate_ewf_results_rejects_uncovered_boundary_bonds(tmp_path):
     assert "1 boundary embedding terms require" in report.warnings[0]
     assert "electron-count deviation -0.5" in report.warnings[1]
     assert "1 boundary correction slots are not parameterized" in report.warnings[2]
+
+
+def test_validate_ewf_results_rejects_non_ntpoly_solver_metadata():
+    result = adapter.SiestaEwfResult(
+        block_id=0,
+        machine_id=0,
+        rank=0,
+        core_atom_range=(0, 1),
+        input_atom_range=(0, 1),
+        core_atoms=(0,),
+        buffer_atoms=(),
+        core_atom_orbital_ranges={0: (0, 1)},
+        converged=True,
+        total_energy_ev=-1.0,
+        density_matrix_path=Path("x.DM"),
+        hamiltonian_matrix_path=Path("x.HSX"),
+        overlap_matrix_path=Path("x.HSX"),
+        orbital_index_path=Path("x.ORB_INDX"),
+        output_path=Path("siesta.out"),
+        matrix_metadata={"elsi": {"solver_used": ["ELPA"]}},
+    )
+
+    report = adapter.validate_ewf_results([result], natoms=1, require_matrices=False)
+
+    assert report.ok is False
+    assert "expected ['NTPOLY']" in report.errors[0]
 
 
 def test_assemble_global_matrices_from_core_owned_blocks(tmp_path):

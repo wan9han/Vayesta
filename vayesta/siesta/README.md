@@ -121,7 +121,8 @@ This keeps each local SIESTA block on the ELSI -> NTPoly density-matrix
 purification path instead of the ELSI default ELPA diagonalization path.  In the
 bundled NTPoly source, `TRS2` is the density-matrix purification routine; the
 adapter records the requested NTPoly method in the generated input and validates
-the actually used ELSI solver from `elsi_log.json` during smoke testing.
+the actually used ELSI solver from `elsi_log.json` during output parsing and
+`validation.json` generation.
 
 `read_siesta_output` currently returns the scalar text-output contract:
 
