@@ -727,6 +727,34 @@ def test_embedding_benchmark_manifest_flags_energy_error(tmp_path):
     assert payload["ok"] is False
 
 
+def test_embedding_benchmark_can_use_reference_workdir(tmp_path):
+    embedded = tmp_path / "embedded"
+    reference = tmp_path / "reference"
+    embedded.mkdir()
+    reference.mkdir()
+    (embedded / "embedded_observables.json").write_text(
+        json.dumps({"embedded_total_energy_ev": -10.0, "corrected_density_overlap_trace": 4.0})
+    )
+    (embedded / "global_matrices.json").write_text(json.dumps({"natoms": 2}))
+    (reference / "embedded_observables.json").write_text(
+        json.dumps({"embedded_total_energy_ev": -10.1, "corrected_density_overlap_trace": 4.0})
+    )
+
+    reference_payload = adapter.reference_observables_from_workdir(reference, label="full")
+    payload = adapter.write_embedding_benchmark_from_reference_workdir(
+        embedded,
+        reference,
+        label="full",
+        energy_tolerance_ev=0.2,
+    )
+
+    assert reference_payload["label"] == "full"
+    assert reference_payload["total_energy_ev"] == -10.1
+    assert payload["reference_label"] == "full"
+    assert payload["energy_error_ev"] == 0.09999999999999964
+    assert payload["ok"] is True
+
+
 def test_calibrate_boundary_corrections_to_reference_energy(tmp_path):
     (tmp_path / "boundary_corrections.json").write_text(
         json.dumps(

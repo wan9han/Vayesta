@@ -1804,6 +1804,47 @@ def write_embedding_benchmark_manifest(
     return payload
 
 
+def reference_observables_from_workdir(
+    workdir: str | os.PathLike[str],
+    label: str | None = None,
+) -> dict:
+    """Extract reference observables from a SIESTA/EWF run directory."""
+
+    workdir = Path(workdir)
+    embedded = _read_optional_json(workdir / "embedded_observables.json") or {}
+    validation = _read_optional_json(workdir / "validation.json") or {}
+    global_matrices = _read_optional_json(workdir / "global_matrices.json") or {}
+    total_energy = embedded.get("embedded_total_energy_ev", validation.get("total_block_energy_ev"))
+    density_trace = embedded.get(
+        "corrected_density_overlap_trace",
+        global_matrices.get("density_overlap_trace_total"),
+    )
+    return {
+        "label": label or str(workdir),
+        "total_energy_ev": total_energy,
+        "density_overlap_trace_total": density_trace,
+        "source_workdir": str(workdir),
+    }
+
+
+def write_embedding_benchmark_from_reference_workdir(
+    workdir: str | os.PathLike[str],
+    reference_workdir: str | os.PathLike[str],
+    label: str | None = None,
+    energy_tolerance_ev: float = 1.0e-3,
+    electron_tolerance: float = 1.0e-6,
+) -> dict:
+    """Write a benchmark manifest using another run directory as reference."""
+
+    reference = reference_observables_from_workdir(reference_workdir, label=label)
+    return write_embedding_benchmark_manifest(
+        workdir,
+        reference,
+        energy_tolerance_ev=energy_tolerance_ev,
+        electron_tolerance=electron_tolerance,
+    )
+
+
 def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     """Report whether SIESTA block artifacts are ready for physical EWF use."""
 
