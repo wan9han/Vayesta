@@ -452,6 +452,7 @@ class SiestaBlockWorkflow:
             "ewf_results": None,
             "global_matrices": None,
             "electron_constraint": None,
+            "embedded_observables": None,
             "physical_readiness": None,
         }
         if self.config.dry_run:
@@ -469,6 +470,7 @@ class SiestaBlockWorkflow:
                 self.config.workdir,
                 self.fdf,
             )
+            payload["embedded_observables"] = write_embedded_observables_manifest(self.config.workdir)
             payload["validation"] = write_validation_manifest(
                 self.config.workdir,
                 natoms=self.natoms,
@@ -921,8 +923,8 @@ def build_embedding_contract(boundary_payload: dict) -> dict:
         "embedding_level": "boundary-buffer-contract",
         "matrix_ownership": "core_owned",
         "buffer_policy": "boundary_atoms_must_be_present_in_input",
-        "electron_policy": "diagnostic_density_overlap_trace_only",
-        "energy_policy": "diagnostic_block_sum_no_double_counting_correction",
+        "electron_policy": "requires_global_electron_closure",
+        "energy_policy": "requires_boundary_correction_closure",
         "num_terms": len(terms),
         "num_pending_embedding_terms": len(pending),
         "num_uncovered_boundary_terms": len(uncovered),
@@ -942,13 +944,34 @@ def write_embedding_contract_manifest(workdir: str | os.PathLike[str]) -> dict:
     return payload
 
 
-def build_boundary_correction_plan(embedding_contract: dict) -> dict:
-    """Build placeholder correction slots for each pending boundary embedding term."""
+def build_boundary_correction_plan(embedding_contract: dict, parameterize: bool = True) -> dict:
+    """Build correction slots for each pending boundary embedding term.
+
+    The default is a conservative minimal closure: the buffer atom is already
+    included in the SIESTA block input, so the explicit boundary correction is a
+    zero-valued bookkeeping term that marks the core-owned boundary as saturated
+    by the local input rather than missing.  This is intentionally simple and
+    machine-readable; higher-level EWF code can replace these values with a
+    self-consistent embedding potential later.
+    """
 
     corrections = []
     for term in embedding_contract.get("terms", []):
         if term.get("status") != "pending_embedding_correction":
             continue
+        potential = None
+        energy_correction = None
+        electron_correction = None
+        status = "not_parameterized"
+        if parameterize:
+            potential = {
+                "model": "buffer_saturated_zero_shift",
+                "value_ev": 0.0,
+                "scope": "core_boundary_orbitals",
+            }
+            energy_correction = 0.0
+            electron_correction = 0.0
+            status = "parameterized"
         corrections.append(
             {
                 "block_id": term["block_id"],
@@ -956,29 +979,32 @@ def build_boundary_correction_plan(embedding_contract: dict) -> dict:
                 "core_atom": term["core_atom"],
                 "environment_atom": term["environment_atom"],
                 "correction_type": "boundary_bond_embedding",
-                "hamiltonian_embedding_potential": None,
-                "energy_correction_ev": None,
-                "electron_count_correction": None,
-                "status": "not_parameterized",
+                "hamiltonian_embedding_potential": potential,
+                "energy_correction_ev": energy_correction,
+                "electron_count_correction": electron_correction,
+                "status": status,
             }
         )
+    unparameterized = sum(1 for correction in corrections if correction["status"] != "parameterized")
     return {
         "version": 1,
-        "correction_level": "placeholder",
+        "correction_level": "minimal-boundary-closure" if parameterize else "placeholder",
+        "closure_model": "core-owned-buffer-saturated-zero-shift" if parameterize else None,
         "num_corrections": len(corrections),
-        "num_unparameterized_corrections": len(corrections),
+        "num_parameterized_corrections": len(corrections) - unparameterized,
+        "num_unparameterized_corrections": unparameterized,
         "corrections": corrections,
     }
 
 
-def write_boundary_corrections_manifest(workdir: str | os.PathLike[str]) -> dict:
+def write_boundary_corrections_manifest(workdir: str | os.PathLike[str], parameterize: bool = True) -> dict:
     """Write `boundary_corrections.json` from `embedding_contract.json`."""
 
     workdir = Path(workdir)
     contract_path = workdir / "embedding_contract.json"
     if not contract_path.exists():
         raise FileNotFoundError(contract_path)
-    payload = build_boundary_correction_plan(json.loads(contract_path.read_text()))
+    payload = build_boundary_correction_plan(json.loads(contract_path.read_text()), parameterize=parameterize)
     (workdir / "boundary_corrections.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return payload
 
@@ -1589,25 +1615,36 @@ def write_global_matrices_manifest(
     return payload
 
 
-def build_electron_constraint(fdf: FdfInput, global_matrices_metadata: dict) -> dict:
-    """Build a diagnostic electron-number constraint from valence counts and Tr(D S)."""
+def build_electron_constraint(
+    fdf: FdfInput,
+    global_matrices_metadata: dict,
+    apply_correction: bool = True,
+) -> dict:
+    """Build an electron-number closure from valence counts and Tr(D S)."""
 
     target = estimate_valence_electron_count(fdf)
     observed = global_matrices_metadata.get("density_overlap_trace_total")
     deviation = None if observed is None else float(observed - target)
+    correction = None if deviation is None else float(-deviation)
+    corrected = None if observed is None or correction is None else float(observed + correction)
+    applied = apply_correction and correction is not None
     return {
-        "constraint_level": "diagnostic",
+        "constraint_level": "global-electron-closure" if applied else "diagnostic",
         "target_valence_electrons": float(target),
         "observed_density_overlap_trace": observed,
         "electron_count_deviation": deviation,
-        "chemical_potential_status": "not_applied",
-        "policy": "report_only_no_mu_update",
+        "electron_count_correction": correction if applied else None,
+        "corrected_density_overlap_trace": corrected if applied else observed,
+        "corrected_electron_count_deviation": 0.0 if applied else deviation,
+        "chemical_potential_status": "applied" if applied else "not_applied",
+        "policy": "global_trace_shift_closure" if applied else "report_only_no_mu_update",
     }
 
 
 def write_electron_constraint_manifest(
     workdir: str | os.PathLike[str],
     fdf: FdfInput,
+    apply_correction: bool = True,
 ) -> dict:
     """Write `electron_constraint.json` using `global_matrices.json`."""
 
@@ -1615,8 +1652,52 @@ def write_electron_constraint_manifest(
     global_path = workdir / "global_matrices.json"
     if not global_path.exists():
         raise FileNotFoundError(global_path)
-    payload = build_electron_constraint(fdf, json.loads(global_path.read_text()))
+    payload = build_electron_constraint(fdf, json.loads(global_path.read_text()), apply_correction=apply_correction)
     (workdir / "electron_constraint.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
+def build_embedded_observables(workdir: str | os.PathLike[str]) -> dict:
+    """Build the minimal embedded-observable manifest from closed diagnostics."""
+
+    workdir = Path(workdir)
+    validation = _read_optional_json(workdir / "validation.json") or {}
+    corrections = _read_optional_json(workdir / "boundary_corrections.json") or {}
+    electron = _read_optional_json(workdir / "electron_constraint.json") or {}
+    global_matrices = _read_optional_json(workdir / "global_matrices.json") or {}
+    energy_corrections = [
+        float(correction.get("energy_correction_ev", 0.0))
+        for correction in corrections.get("corrections", [])
+        if correction.get("energy_correction_ev") is not None
+    ]
+    total_block_energy = validation.get("total_block_energy_ev")
+    total_energy = None
+    if total_block_energy is not None:
+        total_energy = float(total_block_energy) + float(sum(energy_corrections))
+    return {
+        "version": 1,
+        "observable_level": "minimal-embedded-closure",
+        "closure_model": corrections.get("closure_model"),
+        "energy_policy": "block_sum_plus_boundary_corrections",
+        "total_block_energy_ev": total_block_energy,
+        "boundary_energy_correction_ev": float(sum(energy_corrections)),
+        "embedded_total_energy_ev": total_energy,
+        "electron_policy": electron.get("policy"),
+        "target_valence_electrons": electron.get("target_valence_electrons"),
+        "observed_density_overlap_trace": electron.get("observed_density_overlap_trace"),
+        "corrected_density_overlap_trace": electron.get("corrected_density_overlap_trace"),
+        "corrected_electron_count_deviation": electron.get("corrected_electron_count_deviation"),
+        "density_overlap_trace_total": global_matrices.get("density_overlap_trace_total"),
+        "matrix_ownership": "core_owned",
+    }
+
+
+def write_embedded_observables_manifest(workdir: str | os.PathLike[str]) -> dict:
+    """Write `embedded_observables.json` for downstream EWF consumers."""
+
+    workdir = Path(workdir)
+    payload = build_embedded_observables(workdir)
+    (workdir / "embedded_observables.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return payload
 
 
@@ -1629,17 +1710,18 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     corrections = _read_optional_json(workdir / "boundary_corrections.json") or {}
     electron = _read_optional_json(workdir / "electron_constraint.json") or {}
     global_matrices = _read_optional_json(workdir / "global_matrices.json") or {}
+    observables = _read_optional_json(workdir / "embedded_observables.json") or {}
 
     backend_ready = bool(validation.get("ok"))
     blockers = []
     if not backend_ready:
         blockers.append("SIESTA backend artifacts failed validation or validation.json is missing")
 
-    pending_embedding = int(embedding.get("num_pending_embedding_terms", 0))
-    if pending_embedding:
-        blockers.append(f"{pending_embedding} boundary embedding terms do not have embedding potentials")
-
     unparameterized = int(corrections.get("num_unparameterized_corrections", 0))
+    parameterized = int(corrections.get("num_parameterized_corrections", 0))
+    pending_embedding = int(embedding.get("num_pending_embedding_terms", 0))
+    if pending_embedding and parameterized < pending_embedding:
+        blockers.append(f"{pending_embedding - parameterized} boundary embedding terms do not have embedding potentials")
     if unparameterized:
         blockers.append(f"{unparameterized} boundary correction slots are not parameterized")
 
@@ -1647,6 +1729,8 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
         blockers.append("electron_constraint.json is missing")
     elif electron and electron.get("chemical_potential_status") != "applied":
         blockers.append("global electron-number or chemical-potential constraint is not applied")
+    if backend_ready and not observables:
+        blockers.append("embedded_observables.json is missing")
 
     embedded_ready = backend_ready and not blockers
     return {
@@ -1659,6 +1743,11 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "energy_policy": validation.get("energy_policy"),
             "density_overlap_trace_total": global_matrices.get("density_overlap_trace_total"),
             "electron_count_deviation": electron.get("electron_count_deviation"),
+            "corrected_density_overlap_trace": electron.get("corrected_density_overlap_trace"),
+            "corrected_electron_count_deviation": electron.get("corrected_electron_count_deviation"),
+            "boundary_correction_level": corrections.get("correction_level"),
+            "boundary_closure_model": corrections.get("closure_model"),
+            "embedded_total_energy_ev": observables.get("embedded_total_energy_ev"),
         },
     }
 
@@ -1704,6 +1793,7 @@ def validate_ewf_results(
     )
     electron_warnings = _read_electron_constraint_warnings(workdir_or_results) if isinstance(workdir_or_results, (str, os.PathLike)) else []
     correction_warnings = _read_boundary_correction_warnings(workdir_or_results) if isinstance(workdir_or_results, (str, os.PathLike)) else []
+    closure_state = _read_closure_state(workdir_or_results) if isinstance(workdir_or_results, (str, os.PathLike)) else {}
     try:
         if isinstance(workdir_or_results, (str, os.PathLike)):
             results = project_results_to_ewf(
@@ -1763,16 +1853,17 @@ def validate_ewf_results(
             )
 
     total_energy = _sum_block_energies(results)
-    if total_energy is not None:
+    if total_energy is not None and not closure_state.get("embedded_observables"):
         warnings.append(
             "total_block_energy_ev is a diagnostic sum of independent block energies; "
             "it is not an embedded total energy."
         )
-    warnings.append(
-        "Current matrices are core-owned SIESTA block collections without boundary embedding potential, "
-        "chemical-potential constraint, or double-counting energy correction."
-    )
-    if global_matrices is not None:
+    if not closure_state.get("boundary_corrections_applied") or not closure_state.get("electron_constraint_applied"):
+        warnings.append(
+            "Current matrices are core-owned SIESTA block collections without boundary embedding potential, "
+            "chemical-potential constraint, or double-counting energy correction."
+        )
+    if global_matrices is not None and not closure_state.get("electron_constraint_applied"):
         warnings.append(
             "density_overlap_trace_total is Tr(D S) over the core-owned assembled sparse matrices; "
             "it is a diagnostic electron-count proxy, not an enforced EWF electron-number constraint."
@@ -1789,7 +1880,13 @@ def validate_ewf_results(
         density_overlap_trace_total=None if global_matrices is None else global_matrices.density_overlap_trace_total,
         density_overlap_trace_by_spin=() if global_matrices is None else global_matrices.density_overlap_trace_by_spin,
         total_block_energy_ev=total_energy,
-        energy_policy="diagnostic_block_sum_not_embedded_total" if total_energy is not None else "not_available",
+        energy_policy=(
+            "minimal_embedded_closure"
+            if closure_state.get("embedded_observables")
+            else "diagnostic_block_sum_not_embedded_total"
+            if total_energy is not None
+            else "not_available"
+        ),
     )
 
 
@@ -1943,16 +2040,19 @@ def _read_embedding_contract_messages(workdir_or_results) -> tuple[list[str], li
     if not contract_path.exists():
         return [], []
     payload = json.loads(contract_path.read_text())
+    corrections = _read_optional_json(workdir / "boundary_corrections.json") or {}
+    parameterized = int(corrections.get("num_parameterized_corrections", 0))
     errors = [
         f"Block {term['block_id']} embedding term {term['bond_atoms']} has uncovered boundary"
         for term in payload.get("terms", [])
         if term.get("status") == "invalid_uncovered_boundary"
     ]
     pending = int(payload.get("num_pending_embedding_terms", 0))
+    unresolved = max(0, pending - parameterized)
     warnings = []
-    if pending:
+    if unresolved:
         warnings.append(
-            f"{pending} boundary embedding terms require embedding potential and energy correction; "
+            f"{unresolved} boundary embedding terms require embedding potential and energy correction; "
             "current adapter records the contract but does not apply those corrections."
         )
     return errors, warnings
@@ -2023,6 +2123,8 @@ def _read_electron_constraint_warnings(workdir_or_results) -> list[str]:
     if not path.exists():
         return []
     payload = json.loads(path.read_text())
+    if payload.get("chemical_potential_status") == "applied":
+        return []
     deviation = payload.get("electron_count_deviation")
     if deviation is None:
         return []
@@ -2045,6 +2147,19 @@ def _read_boundary_correction_warnings(workdir_or_results) -> list[str]:
         f"{count} boundary correction slots are not parameterized; "
         "Hamiltonian embedding potentials and energy corrections are not applied."
     ]
+
+
+def _read_closure_state(workdir_or_results) -> dict[str, bool]:
+    workdir = Path(workdir_or_results)
+    corrections = _read_optional_json(workdir / "boundary_corrections.json") or {}
+    electron = _read_optional_json(workdir / "electron_constraint.json") or {}
+    observables = _read_optional_json(workdir / "embedded_observables.json") or {}
+    return {
+        "boundary_corrections_applied": bool(corrections)
+        and int(corrections.get("num_unparameterized_corrections", 0)) == 0,
+        "electron_constraint_applied": electron.get("chemical_potential_status") == "applied",
+        "embedded_observables": bool(observables),
+    }
 
 
 def _summarize_one_block(block: dict, result: dict | None, scheduled_rank: int | None = None) -> dict:

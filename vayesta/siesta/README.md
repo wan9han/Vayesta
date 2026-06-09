@@ -226,6 +226,25 @@ Both blocks used `solver_used=["NTPOLY"]`, `nt_method=2`, and converged in 13
 SCF steps.  This is the recommended local stress-test configuration before
 trying finer weak-scaling partitions on this workstation.
 
+## Minimal Embedded Closure
+
+The adapter writes a minimal physical closure layer on top of validated SIESTA
+block artifacts:
+
+- `boundary_corrections.json` uses the
+  `core-owned-buffer-saturated-zero-shift` model.  Boundary atoms are already
+  present in the local SIESTA input; the explicit correction term is therefore a
+  parameterized zero Hamiltonian shift and zero boundary energy correction until
+  a higher EWF layer replaces it.
+- `electron_constraint.json` applies a global trace-shift closure so the
+  corrected electron count matches the target valence count.
+- `embedded_observables.json` combines the block energy sum, boundary energy
+  corrections, and corrected electron-count metadata.
+
+When these files are present and validation passes, `physical_readiness.json`
+reports `embedded_observable_ready`.  This is a minimal embedding closure, not a
+self-consistent bath-potential or high-level correlated EWF solver.
+
 The public collection helpers are:
 
 - `collect_rank_results(workdir)`: read all `result_rank_XXXX.json` files and return block-ordered result metadata.
@@ -237,7 +256,7 @@ The public collection helpers are:
 - `write_boundary_manifest(workdir, fdf, blocks)`: write those diagnostics to `boundary.json`.
 - `build_embedding_contract(boundary_payload)`: derive pending embedding/boundary correction terms.
 - `write_embedding_contract_manifest(workdir)`: write those terms to `embedding_contract.json`.
-- `build_boundary_correction_plan(embedding_contract)`: derive explicit unparameterized correction slots.
+- `build_boundary_correction_plan(embedding_contract)`: derive explicit boundary correction slots.
 - `write_boundary_corrections_manifest(workdir)`: write those slots to `boundary_corrections.json`.
 - `build_physical_readiness_report(workdir)`: report backend readiness versus final embedded-observable readiness.
 - `write_physical_readiness_manifest(workdir)`: write that report to `physical_readiness.json`.
@@ -247,6 +266,7 @@ The public collection helpers are:
 - `write_ewf_results_manifest(workdir)`: write `ewf_results.json` with core-owned `SiestaEwfResult` metadata.
 - `assemble_global_matrices(workdir_or_results, natoms=None)`: assemble core-owned sparse DM/H/S entries into compact global orbital numbering.
 - `write_global_matrices_manifest(workdir, natoms=None)`: write `global_matrices.json` with the assembled matrix summary.
+- `write_embedded_observables_manifest(workdir)`: write the minimal closed observable manifest.
 - `summarize_run(workdir)`: build rank/block success, timing, and matrix-size metrics.
 - `write_run_summary_manifest(workdir)`: write those metrics to `run_summary.json`.
 - `compare_weak_scaling_runs(workdirs)`: compare multiple `run_summary.json` files.

@@ -455,7 +455,7 @@ def test_embedding_contract_manifest_records_pending_boundary_corrections(tmp_pa
     assert json.loads((tmp_path / "embedding_contract.json").read_text()) == payload
 
 
-def test_boundary_corrections_manifest_creates_unparameterized_slots(tmp_path):
+def test_boundary_corrections_manifest_creates_parameterized_minimal_closure(tmp_path):
     (tmp_path / "embedding_contract.json").write_text(
         json.dumps(
             {
@@ -481,14 +481,40 @@ def test_boundary_corrections_manifest_creates_unparameterized_slots(tmp_path):
 
     payload = adapter.write_boundary_corrections_manifest(tmp_path)
 
-    assert payload["correction_level"] == "placeholder"
+    assert payload["correction_level"] == "minimal-boundary-closure"
+    assert payload["closure_model"] == "core-owned-buffer-saturated-zero-shift"
     assert payload["num_corrections"] == 1
-    assert payload["num_unparameterized_corrections"] == 1
+    assert payload["num_parameterized_corrections"] == 1
+    assert payload["num_unparameterized_corrections"] == 0
     assert payload["corrections"][0]["correction_type"] == "boundary_bond_embedding"
-    assert payload["corrections"][0]["hamiltonian_embedding_potential"] is None
-    assert payload["corrections"][0]["energy_correction_ev"] is None
-    assert payload["corrections"][0]["status"] == "not_parameterized"
+    assert payload["corrections"][0]["hamiltonian_embedding_potential"]["value_ev"] == 0.0
+    assert payload["corrections"][0]["energy_correction_ev"] == 0.0
+    assert payload["corrections"][0]["status"] == "parameterized"
     assert json.loads((tmp_path / "boundary_corrections.json").read_text()) == payload
+
+
+def test_boundary_corrections_manifest_can_write_unparameterized_slots(tmp_path):
+    (tmp_path / "embedding_contract.json").write_text(
+        json.dumps(
+            {
+                "terms": [
+                    {
+                        "block_id": 0,
+                        "bond_atoms": [1, 2],
+                        "core_atom": 1,
+                        "environment_atom": 2,
+                        "status": "pending_embedding_correction",
+                    }
+                ]
+            }
+        )
+    )
+
+    payload = adapter.write_boundary_corrections_manifest(tmp_path, parameterize=False)
+
+    assert payload["correction_level"] == "placeholder"
+    assert payload["num_unparameterized_corrections"] == 1
+    assert payload["corrections"][0]["status"] == "not_parameterized"
 
 
 def test_electron_constraint_manifest_reports_valence_deviation(tmp_path):
@@ -518,12 +544,42 @@ def test_electron_constraint_manifest_reports_valence_deviation(tmp_path):
 
     assert fdf.species_atomic_numbers == {1: 6, 2: 1}
     assert adapter.estimate_valence_electron_count(fdf) == 5
-    assert payload["constraint_level"] == "diagnostic"
+    assert payload["constraint_level"] == "global-electron-closure"
     assert payload["target_valence_electrons"] == 5.0
     assert payload["observed_density_overlap_trace"] == 4.5
     assert payload["electron_count_deviation"] == -0.5
-    assert payload["chemical_potential_status"] == "not_applied"
+    assert payload["chemical_potential_status"] == "applied"
+    assert payload["electron_count_correction"] == 0.5
+    assert payload["corrected_density_overlap_trace"] == 5.0
+    assert payload["corrected_electron_count_deviation"] == 0.0
     assert json.loads((tmp_path / "electron_constraint.json").read_text()) == payload
+
+
+def test_electron_constraint_manifest_can_remain_diagnostic(tmp_path):
+    fdf_path = tmp_path / "methane.fdf"
+    fdf_path.write_text(
+        "\n".join(
+            [
+                "SystemLabel methane",
+                "NumberOfAtoms 1",
+                "NumberOfSpecies 1",
+                "%block ChemicalSpeciesLabel",
+                "1 6 C",
+                "%endblock ChemicalSpeciesLabel",
+                "%block AtomicCoordinatesAndAtomicSpecies",
+                "0.0 0.0 0.0 1",
+                "%endblock AtomicCoordinatesAndAtomicSpecies",
+            ]
+        )
+        + "\n"
+    )
+    fdf = adapter.parse_fdf(fdf_path)
+    (tmp_path / "global_matrices.json").write_text(json.dumps({"density_overlap_trace_total": 3.5}))
+
+    payload = adapter.write_electron_constraint_manifest(tmp_path, fdf, apply_correction=False)
+
+    assert payload["chemical_potential_status"] == "not_applied"
+    assert payload["electron_count_correction"] is None
 
 
 def test_physical_readiness_report_blocks_diagnostic_backend_only_results(tmp_path):
@@ -565,6 +621,7 @@ def test_physical_readiness_report_allows_completed_embedding_contract(tmp_path)
     (tmp_path / "embedding_contract.json").write_text(json.dumps({"num_pending_embedding_terms": 0}))
     (tmp_path / "boundary_corrections.json").write_text(json.dumps({"num_unparameterized_corrections": 0}))
     (tmp_path / "electron_constraint.json").write_text(json.dumps({"chemical_potential_status": "applied"}))
+    (tmp_path / "embedded_observables.json").write_text(json.dumps({"embedded_total_energy_ev": -1.0}))
 
     payload = adapter.build_physical_readiness_report(tmp_path)
 
@@ -572,6 +629,43 @@ def test_physical_readiness_report_allows_completed_embedding_contract(tmp_path)
     assert payload["embedded_observable_ready"] is True
     assert payload["status"] == "embedded_observable_ready"
     assert payload["blockers"] == []
+
+
+def test_embedded_observables_manifest_combines_energy_and_electron_closure(tmp_path):
+    (tmp_path / "validation.json").write_text(
+        json.dumps({"total_block_energy_ev": -10.0})
+    )
+    (tmp_path / "boundary_corrections.json").write_text(
+        json.dumps(
+            {
+                "closure_model": "core-owned-buffer-saturated-zero-shift",
+                "corrections": [
+                    {"energy_correction_ev": -0.25},
+                    {"energy_correction_ev": 0.0},
+                ],
+            }
+        )
+    )
+    (tmp_path / "electron_constraint.json").write_text(
+        json.dumps(
+            {
+                "policy": "global_trace_shift_closure",
+                "target_valence_electrons": 5.0,
+                "observed_density_overlap_trace": 4.5,
+                "corrected_density_overlap_trace": 5.0,
+                "corrected_electron_count_deviation": 0.0,
+            }
+        )
+    )
+    (tmp_path / "global_matrices.json").write_text(json.dumps({"density_overlap_trace_total": 4.5}))
+
+    payload = adapter.write_embedded_observables_manifest(tmp_path)
+
+    assert payload["observable_level"] == "minimal-embedded-closure"
+    assert payload["embedded_total_energy_ev"] == -10.25
+    assert payload["boundary_energy_correction_ev"] == -0.25
+    assert payload["corrected_density_overlap_trace"] == 5.0
+    assert json.loads((tmp_path / "embedded_observables.json").read_text()) == payload
 
 
 def test_read_run_config_from_environment(tmp_path):
