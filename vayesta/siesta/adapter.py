@@ -1701,6 +1701,69 @@ def write_embedded_observables_manifest(workdir: str | os.PathLike[str]) -> dict
     return payload
 
 
+def build_embedding_benchmark(
+    workdir: str | os.PathLike[str],
+    reference_observables: dict,
+    energy_tolerance_ev: float = 1.0e-3,
+    electron_tolerance: float = 1.0e-6,
+) -> dict:
+    """Compare closed embedded observables against a reference calculation."""
+
+    workdir = Path(workdir)
+    embedded = _read_optional_json(workdir / "embedded_observables.json") or {}
+    global_matrices = _read_optional_json(workdir / "global_matrices.json") or {}
+    natoms = global_matrices.get("natoms")
+    embedded_energy = embedded.get("embedded_total_energy_ev")
+    reference_energy = reference_observables.get("total_energy_ev")
+    energy_error = _difference(embedded_energy, reference_energy)
+    energy_error_per_atom = None
+    if energy_error is not None and natoms:
+        energy_error_per_atom = float(energy_error / int(natoms))
+
+    embedded_electrons = embedded.get("corrected_density_overlap_trace")
+    reference_electrons = reference_observables.get("density_overlap_trace_total")
+    electron_error = _difference(embedded_electrons, reference_electrons)
+    energy_ok = energy_error is not None and abs(energy_error) <= energy_tolerance_ev
+    electron_ok = electron_error is None or abs(electron_error) <= electron_tolerance
+    return {
+        "version": 1,
+        "benchmark_level": "embedded_vs_reference_observables",
+        "reference_label": reference_observables.get("label", "reference"),
+        "natoms": natoms,
+        "energy_tolerance_ev": energy_tolerance_ev,
+        "electron_tolerance": electron_tolerance,
+        "embedded_total_energy_ev": embedded_energy,
+        "reference_total_energy_ev": reference_energy,
+        "energy_error_ev": energy_error,
+        "energy_error_per_atom_ev": energy_error_per_atom,
+        "corrected_density_overlap_trace": embedded_electrons,
+        "reference_density_overlap_trace": reference_electrons,
+        "electron_count_error": electron_error,
+        "energy_within_tolerance": energy_ok,
+        "electron_count_within_tolerance": electron_ok,
+        "ok": bool(energy_ok and electron_ok),
+    }
+
+
+def write_embedding_benchmark_manifest(
+    workdir: str | os.PathLike[str],
+    reference_observables: dict,
+    energy_tolerance_ev: float = 1.0e-3,
+    electron_tolerance: float = 1.0e-6,
+) -> dict:
+    """Write `embedding_benchmark.json` for reference-quality tracking."""
+
+    workdir = Path(workdir)
+    payload = build_embedding_benchmark(
+        workdir,
+        reference_observables,
+        energy_tolerance_ev=energy_tolerance_ev,
+        electron_tolerance=electron_tolerance,
+    )
+    (workdir / "embedding_benchmark.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
 def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     """Report whether SIESTA block artifacts are ready for physical EWF use."""
 
@@ -1711,6 +1774,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     electron = _read_optional_json(workdir / "electron_constraint.json") or {}
     global_matrices = _read_optional_json(workdir / "global_matrices.json") or {}
     observables = _read_optional_json(workdir / "embedded_observables.json") or {}
+    benchmark = _read_optional_json(workdir / "embedding_benchmark.json") or {}
 
     backend_ready = bool(validation.get("ok"))
     blockers = []
@@ -1748,6 +1812,9 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "boundary_correction_level": corrections.get("correction_level"),
             "boundary_closure_model": corrections.get("closure_model"),
             "embedded_total_energy_ev": observables.get("embedded_total_energy_ev"),
+            "benchmark_ok": benchmark.get("ok"),
+            "benchmark_energy_error_ev": benchmark.get("energy_error_ev"),
+            "benchmark_energy_error_per_atom_ev": benchmark.get("energy_error_per_atom_ev"),
         },
     }
 
@@ -2160,6 +2227,12 @@ def _read_closure_state(workdir_or_results) -> dict[str, bool]:
         "electron_constraint_applied": electron.get("chemical_potential_status") == "applied",
         "embedded_observables": bool(observables),
     }
+
+
+def _difference(value, reference) -> float | None:
+    if value is None or reference is None:
+        return None
+    return float(value) - float(reference)
 
 
 def _summarize_one_block(block: dict, result: dict | None, scheduled_rank: int | None = None) -> dict:

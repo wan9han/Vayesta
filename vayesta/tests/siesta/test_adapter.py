@@ -622,6 +622,9 @@ def test_physical_readiness_report_allows_completed_embedding_contract(tmp_path)
     (tmp_path / "boundary_corrections.json").write_text(json.dumps({"num_unparameterized_corrections": 0}))
     (tmp_path / "electron_constraint.json").write_text(json.dumps({"chemical_potential_status": "applied"}))
     (tmp_path / "embedded_observables.json").write_text(json.dumps({"embedded_total_energy_ev": -1.0}))
+    (tmp_path / "embedding_benchmark.json").write_text(
+        json.dumps({"ok": False, "energy_error_ev": 0.2, "energy_error_per_atom_ev": 0.1})
+    )
 
     payload = adapter.build_physical_readiness_report(tmp_path)
 
@@ -629,6 +632,8 @@ def test_physical_readiness_report_allows_completed_embedding_contract(tmp_path)
     assert payload["embedded_observable_ready"] is True
     assert payload["status"] == "embedded_observable_ready"
     assert payload["blockers"] == []
+    assert payload["diagnostic_outputs"]["benchmark_ok"] is False
+    assert payload["diagnostic_outputs"]["benchmark_energy_error_ev"] == 0.2
 
 
 def test_embedded_observables_manifest_combines_energy_and_electron_closure(tmp_path):
@@ -666,6 +671,50 @@ def test_embedded_observables_manifest_combines_energy_and_electron_closure(tmp_
     assert payload["boundary_energy_correction_ev"] == -0.25
     assert payload["corrected_density_overlap_trace"] == 5.0
     assert json.loads((tmp_path / "embedded_observables.json").read_text()) == payload
+
+
+def test_embedding_benchmark_manifest_compares_reference_observables(tmp_path):
+    (tmp_path / "embedded_observables.json").write_text(
+        json.dumps(
+            {
+                "embedded_total_energy_ev": -10.25,
+                "corrected_density_overlap_trace": 5.0,
+            }
+        )
+    )
+    (tmp_path / "global_matrices.json").write_text(json.dumps({"natoms": 5}))
+
+    payload = adapter.write_embedding_benchmark_manifest(
+        tmp_path,
+        {
+            "label": "full-siesta",
+            "total_energy_ev": -10.0,
+            "density_overlap_trace_total": 5.0,
+        },
+        energy_tolerance_ev=0.3,
+    )
+
+    assert payload["reference_label"] == "full-siesta"
+    assert payload["energy_error_ev"] == -0.25
+    assert payload["energy_error_per_atom_ev"] == -0.05
+    assert payload["electron_count_error"] == 0.0
+    assert payload["ok"] is True
+    assert json.loads((tmp_path / "embedding_benchmark.json").read_text()) == payload
+
+
+def test_embedding_benchmark_manifest_flags_energy_error(tmp_path):
+    (tmp_path / "embedded_observables.json").write_text(json.dumps({"embedded_total_energy_ev": -12.0}))
+    (tmp_path / "global_matrices.json").write_text(json.dumps({"natoms": 2}))
+
+    payload = adapter.build_embedding_benchmark(
+        tmp_path,
+        {"total_energy_ev": -10.0},
+        energy_tolerance_ev=0.1,
+    )
+
+    assert payload["energy_error_ev"] == -2.0
+    assert payload["energy_within_tolerance"] is False
+    assert payload["ok"] is False
 
 
 def test_read_run_config_from_environment(tmp_path):
