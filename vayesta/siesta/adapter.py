@@ -1801,6 +1801,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
         "version": 1,
         "backend_artifacts_ready": backend_ready,
         "embedded_observable_ready": embedded_ready,
+        "reference_benchmark_ready": benchmark.get("ok"),
         "status": "embedded_observable_ready" if embedded_ready else "diagnostic_backend_only",
         "blockers": blockers,
         "diagnostic_outputs": {

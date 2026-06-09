@@ -630,6 +630,7 @@ def test_physical_readiness_report_allows_completed_embedding_contract(tmp_path)
 
     assert payload["backend_artifacts_ready"] is True
     assert payload["embedded_observable_ready"] is True
+    assert payload["reference_benchmark_ready"] is False
     assert payload["status"] == "embedded_observable_ready"
     assert payload["blockers"] == []
     assert payload["diagnostic_outputs"]["benchmark_ok"] is False
