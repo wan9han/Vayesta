@@ -420,6 +420,7 @@ class SiestaBlockWorkflow:
             self.blocks,
             num_machines=self.config.num_machines,
             procs_per_machine=self.config.procs_per_machine,
+            threads_per_proc=self.config.threads_per_proc,
         )
         write_boundary_manifest(self.config.workdir, self.fdf, self.blocks)
         write_embedding_contract_manifest(self.config.workdir)
@@ -448,6 +449,7 @@ class SiestaBlockWorkflow:
         payload = {
             "results": write_results_manifest(self.config.workdir),
             "run_summary": write_run_summary_manifest(self.config.workdir),
+            "weak_scaling_report": None,
             "validation": None,
             "ewf_results": None,
             "global_matrices": None,
@@ -455,6 +457,10 @@ class SiestaBlockWorkflow:
             "embedded_observables": None,
             "physical_readiness": None,
         }
+        payload["weak_scaling_report"] = write_weak_scaling_report(
+            self.config.workdir / "weak_scaling_report.json",
+            [self.config.workdir],
+        )
         if self.config.dry_run:
             return payload
         validation = write_validation_manifest(
@@ -1080,6 +1086,7 @@ def build_schedule(
     blocks: Sequence[SiestaBlock],
     num_machines: int,
     procs_per_machine: int,
+    threads_per_proc: int | None = None,
 ) -> dict:
     """Build the complete block-to-rank schedule for a simulated topology."""
 
@@ -1106,11 +1113,16 @@ def build_schedule(
     for rank_info in ranks:
         for block_id in rank_info["block_ids"]:
             block_owner[str(block_id)] = rank_info["rank"]
+    rank_block_counts = {str(rank_info["rank"]): rank_info["num_blocks"] for rank_info in ranks}
+    total_ranks = num_machines * procs_per_machine
     return {
         "num_machines": num_machines,
         "procs_per_machine": procs_per_machine,
-        "num_ranks": num_machines * procs_per_machine,
+        "threads_per_proc": threads_per_proc,
+        "num_ranks": total_ranks,
+        "total_ranks": total_ranks,
         "num_blocks": len(blocks),
+        "rank_block_counts": rank_block_counts,
         "ranks": ranks,
         "block_owner_rank": block_owner,
     }
@@ -1121,11 +1133,12 @@ def write_schedule_manifest(
     blocks: Sequence[SiestaBlock],
     num_machines: int,
     procs_per_machine: int,
+    threads_per_proc: int | None = None,
 ) -> dict:
     """Write `schedule.json` with the complete planned block distribution."""
 
     workdir = Path(workdir)
-    payload = build_schedule(blocks, num_machines, procs_per_machine)
+    payload = build_schedule(blocks, num_machines, procs_per_machine, threads_per_proc=threads_per_proc)
     (workdir / "schedule.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return payload
 
@@ -1419,6 +1432,11 @@ def summarize_run(workdir: str | os.PathLike[str]) -> dict:
     ]
     returncodes = [int(result.get("returncode", 0)) for result in results]
     converged = [result.get("converged") is True for result in results]
+    num_blocks = len(blocks)
+    num_successful = sum(1 for code in returncodes if code == 0)
+    num_failed = sum(1 for code in returncodes if code != 0)
+    num_converged = sum(1 for item in converged if item)
+    num_unconverged = sum(1 for item in converged if not item)
     schedule_owner = _read_schedule_owner_ranks(workdir)
     block_summaries = [
         _summarize_one_block(
@@ -1431,14 +1449,20 @@ def summarize_run(workdir: str | os.PathLike[str]) -> dict:
     ranks = sorted({int(result["rank"]) for result in results if result.get("rank") is not None})
     scheduled_ranks = _read_scheduled_ranks(workdir)
     machines = sorted({int(block["machine_id"]) for block in blocks if block.get("machine_id") is not None})
+    max_wall_time = None if not wall_times else float(max(wall_times))
+    mean_wall_time = None if not wall_times else float(sum(wall_times) / len(wall_times))
+    success_rate = _ratio(num_successful, num_blocks)
+    converged_rate = _ratio(num_converged, num_blocks)
     return {
         "workdir": str(workdir),
-        "num_blocks": len(blocks),
+        "num_blocks": num_blocks,
         "num_results": len(results),
-        "num_successful_results": sum(1 for code in returncodes if code == 0),
-        "num_failed_results": sum(1 for code in returncodes if code != 0),
-        "num_converged_results": sum(1 for item in converged if item),
-        "num_unconverged_results": sum(1 for item in converged if not item),
+        "num_successful_results": num_successful,
+        "num_failed_results": num_failed,
+        "num_converged_results": num_converged,
+        "num_unconverged_results": num_unconverged,
+        "success_rate": success_rate,
+        "converged_rate": converged_rate,
         "num_scheduled_ranks": len(scheduled_ranks),
         "scheduled_ranks": scheduled_ranks,
         "num_ranks_with_results": len(ranks),
@@ -1446,12 +1470,15 @@ def summarize_run(workdir: str | os.PathLike[str]) -> dict:
         "num_machines": len(machines),
         "machines": machines,
         "total_wall_time_seconds": None if not wall_times else float(sum(wall_times)),
-        "max_block_wall_time_seconds": None if not wall_times else float(max(wall_times)),
+        "max_block_wall_time_seconds": max_wall_time,
+        "max_block_wall_time": max_wall_time,
         "min_block_wall_time_seconds": None if not wall_times else float(min(wall_times)),
-        "mean_block_wall_time_seconds": None if not wall_times else float(sum(wall_times) / len(wall_times)),
+        "mean_block_wall_time_seconds": mean_wall_time,
+        "mean_block_wall_time": mean_wall_time,
         "solver_used": _summarize_solver_used(results),
         "ntpoly_methods": _summarize_ntpoly_methods(results),
         "max_scf_steps": _summarize_max_scf_steps(results),
+        "weak_scaling_efficiency_vs_baseline": _weak_scaling_efficiency(max_wall_time, max_wall_time),
         "blocks": block_summaries,
     }
 
@@ -1473,10 +1500,25 @@ def compare_weak_scaling_runs(workdirs: Sequence[str | os.PathLike[str]]) -> dic
     summaries = [_load_or_create_run_summary(Path(workdir)) for workdir in workdirs]
     baseline_time = _first_nonnull(summary.get("max_block_wall_time_seconds") for summary in summaries)
     runs = [_weak_scaling_run_entry(summary, baseline_time) for summary in summaries]
+    current_run = runs[-1]
     return {
         "baseline_workdir": runs[0]["workdir"],
         "baseline_max_block_wall_time_seconds": baseline_time,
         "num_runs": len(runs),
+        "current_run": current_run,
+        "num_blocks": current_run.get("num_blocks"),
+        "scheduled_ranks": current_run.get("scheduled_ranks"),
+        "ranks_with_results": current_run.get("ranks_with_results"),
+        "success_rate": current_run.get("success_rate"),
+        "converged_rate": current_run.get("converged_rate"),
+        "max_block_wall_time_seconds": current_run.get("max_block_wall_time_seconds"),
+        "max_block_wall_time": current_run.get("max_block_wall_time"),
+        "mean_block_wall_time_seconds": current_run.get("mean_block_wall_time_seconds"),
+        "mean_block_wall_time": current_run.get("mean_block_wall_time"),
+        "solver_used": current_run.get("solver_used", []),
+        "ntpoly_methods": current_run.get("ntpoly_methods", []),
+        "max_scf_steps": current_run.get("max_scf_steps"),
+        "weak_scaling_efficiency_vs_baseline": current_run.get("weak_scaling_efficiency_vs_baseline"),
         "runs": runs,
     }
 
@@ -1765,10 +1807,14 @@ def build_embedding_benchmark(
     electron_error = _difference(embedded_electrons, reference_electrons)
     energy_ok = energy_error is not None and abs(energy_error) <= energy_tolerance_ev
     electron_ok = electron_error is None or abs(electron_error) <= electron_tolerance
+    ok = bool(energy_ok and electron_ok)
     return {
         "version": 1,
         "benchmark_level": "embedded_vs_reference_observables",
+        "status": "passed" if ok else "failed",
         "reference_label": reference_observables.get("label", "reference"),
+        "reference_kind": reference_observables.get("reference_kind", "external_reference"),
+        "reference_is_external": bool(reference_observables.get("reference_is_external", True)),
         "natoms": natoms,
         "energy_tolerance_ev": energy_tolerance_ev,
         "electron_tolerance": electron_tolerance,
@@ -1781,7 +1827,7 @@ def build_embedding_benchmark(
         "electron_count_error": electron_error,
         "energy_within_tolerance": energy_ok,
         "electron_count_within_tolerance": electron_ok,
-        "ok": bool(energy_ok and electron_ok),
+        "ok": ok,
     }
 
 
@@ -1804,6 +1850,52 @@ def write_embedding_benchmark_manifest(
     return payload
 
 
+def build_reference_missing_embedding_benchmark(
+    workdir: str | os.PathLike[str],
+    reason: str,
+    next_steps: Sequence[str] = (),
+    reference_label: str = "missing-full-system-reference",
+) -> dict:
+    """Build a benchmark-ready manifest when an external reference is absent."""
+
+    workdir = Path(workdir)
+    embedded = _read_optional_json(workdir / "embedded_observables.json") or {}
+    global_matrices = _read_optional_json(workdir / "global_matrices.json") or {}
+    return {
+        "version": 1,
+        "benchmark_level": "reference_missing_benchmark_ready_manifest",
+        "status": "reference_missing",
+        "ok": False,
+        "reference_label": reference_label,
+        "reference_kind": "missing_external_reference",
+        "reference_is_external": False,
+        "reference_missing_reason": reason,
+        "next_validation_steps": list(next_steps),
+        "natoms": global_matrices.get("natoms"),
+        "embedded_total_energy_ev": embedded.get("embedded_total_energy_ev"),
+        "corrected_density_overlap_trace": embedded.get("corrected_density_overlap_trace"),
+    }
+
+
+def write_reference_missing_embedding_benchmark_manifest(
+    workdir: str | os.PathLike[str],
+    reason: str,
+    next_steps: Sequence[str] = (),
+    reference_label: str = "missing-full-system-reference",
+) -> dict:
+    """Write `embedding_benchmark.json` documenting a missing external reference."""
+
+    workdir = Path(workdir)
+    payload = build_reference_missing_embedding_benchmark(
+        workdir,
+        reason=reason,
+        next_steps=next_steps,
+        reference_label=reference_label,
+    )
+    (workdir / "embedding_benchmark.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
 def reference_observables_from_workdir(
     workdir: str | os.PathLike[str],
     label: str | None = None,
@@ -1821,6 +1913,8 @@ def reference_observables_from_workdir(
     )
     return {
         "label": label or str(workdir),
+        "reference_kind": "external_full_system_or_higher_quality_run",
+        "reference_is_external": True,
         "total_energy_ev": total_energy,
         "density_overlap_trace_total": density_trace,
         "source_workdir": str(workdir),
@@ -1878,11 +1972,25 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
         blockers.append("embedded_observables.json is missing")
 
     embedded_ready = backend_ready and not blockers
+    minimal_closure_ready = (
+        backend_ready
+        and bool(observables)
+        and not unparameterized
+        and (not electron or electron.get("chemical_potential_status") == "applied")
+    )
+    reference_calibrated_ready = corrections.get("correction_level") == "reference-calibrated-boundary-closure"
+    benchmark_manifest_ready = bool(benchmark)
+    reference_benchmark_ready = _benchmark_is_external_reference_ready(benchmark)
     return {
         "version": 1,
         "backend_artifacts_ready": backend_ready,
+        "minimal_embedded_closure_ready": minimal_closure_ready,
         "embedded_observable_ready": embedded_ready,
-        "reference_benchmark_ready": benchmark.get("ok"),
+        "reference_calibrated_correction_ready": reference_calibrated_ready,
+        "benchmark_manifest_ready": benchmark_manifest_ready,
+        "reference_benchmark_ready": reference_benchmark_ready,
+        "predictive_embedding_ready": False,
+        "predictive_embedding_status": "not_implemented_minimal_or_reference_calibrated_closure_only",
         "status": "embedded_observable_ready" if embedded_ready else "diagnostic_backend_only",
         "blockers": blockers,
         "diagnostic_outputs": {
@@ -1897,6 +2005,10 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "boundary_total_calibrated_energy_correction_ev": corrections.get("total_calibrated_energy_correction_ev"),
             "embedded_total_energy_ev": observables.get("embedded_total_energy_ev"),
             "benchmark_ok": benchmark.get("ok"),
+            "benchmark_status": benchmark.get("status"),
+            "benchmark_reference_kind": benchmark.get("reference_kind"),
+            "benchmark_reference_is_external": benchmark.get("reference_is_external"),
+            "benchmark_reference_missing_reason": benchmark.get("reference_missing_reason"),
             "benchmark_energy_error_ev": benchmark.get("energy_error_ev"),
             "benchmark_energy_error_per_atom_ev": benchmark.get("energy_error_per_atom_ev"),
         },
@@ -2401,20 +2513,25 @@ def _load_or_create_run_summary(workdir: Path) -> dict:
 
 def _weak_scaling_run_entry(summary: dict, baseline_time: float | None) -> dict:
     max_time = summary.get("max_block_wall_time_seconds")
-    success_rate = _ratio(summary.get("num_successful_results"), summary.get("num_blocks"))
-    converged_rate = _ratio(summary.get("num_converged_results"), summary.get("num_blocks"))
+    mean_time = summary.get("mean_block_wall_time_seconds")
+    success_rate = summary.get("success_rate", _ratio(summary.get("num_successful_results"), summary.get("num_blocks")))
+    converged_rate = summary.get("converged_rate", _ratio(summary.get("num_converged_results"), summary.get("num_blocks")))
     return {
         "workdir": summary.get("workdir"),
         "num_blocks": summary.get("num_blocks"),
         "num_scheduled_ranks": summary.get("num_scheduled_ranks"),
+        "scheduled_ranks": summary.get("scheduled_ranks", []),
         "num_ranks_with_results": summary.get("num_ranks_with_results"),
+        "ranks_with_results": summary.get("ranks_with_results", []),
         "num_machines": summary.get("num_machines"),
         "num_successful_results": summary.get("num_successful_results"),
         "num_failed_results": summary.get("num_failed_results"),
         "success_rate": success_rate,
         "converged_rate": converged_rate,
         "max_block_wall_time_seconds": max_time,
-        "mean_block_wall_time_seconds": summary.get("mean_block_wall_time_seconds"),
+        "max_block_wall_time": max_time,
+        "mean_block_wall_time_seconds": mean_time,
+        "mean_block_wall_time": mean_time,
         "solver_used": summary.get("solver_used", []),
         "ntpoly_methods": summary.get("ntpoly_methods", []),
         "max_scf_steps": summary.get("max_scf_steps"),
@@ -2426,6 +2543,19 @@ def _weak_scaling_efficiency(baseline_time: float | None, current_time: float | 
     if baseline_time is None or current_time is None or current_time <= 0:
         return None
     return float(baseline_time / current_time)
+
+
+def _benchmark_is_external_reference_ready(benchmark: dict) -> bool:
+    if not benchmark:
+        return False
+    if benchmark.get("status") == "reference_missing":
+        return False
+    if benchmark.get("reference_is_external") is False:
+        return False
+    label = str(benchmark.get("reference_label", "")).lower()
+    if "self" in label or "smoke" in label:
+        return False
+    return bool(benchmark.get("ok"))
 
 
 def _ratio(numerator, denominator) -> float | None:

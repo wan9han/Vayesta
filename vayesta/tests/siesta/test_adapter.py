@@ -115,7 +115,10 @@ def test_write_schedule_manifest_covers_all_ranks_and_blocks(tmp_path):
     payload = adapter.write_schedule_manifest(tmp_path, blocks, num_machines=2, procs_per_machine=2)
 
     assert payload["num_ranks"] == 4
+    assert payload["total_ranks"] == 4
+    assert payload["threads_per_proc"] is None
     assert payload["num_blocks"] == 6
+    assert payload["rank_block_counts"] == {"0": 2, "1": 1, "2": 2, "3": 1}
     assert payload["ranks"][0]["rank"] == 0
     assert payload["ranks"][0]["block_ids"] == [0, 4]
     assert payload["ranks"][1]["block_ids"] == [2]
@@ -606,7 +609,10 @@ def test_physical_readiness_report_blocks_diagnostic_backend_only_results(tmp_pa
     payload = adapter.write_physical_readiness_manifest(tmp_path)
 
     assert payload["backend_artifacts_ready"] is True
+    assert payload["minimal_embedded_closure_ready"] is False
     assert payload["embedded_observable_ready"] is False
+    assert payload["reference_benchmark_ready"] is False
+    assert payload["predictive_embedding_ready"] is False
     assert payload["status"] == "diagnostic_backend_only"
     assert "2 boundary embedding terms" in payload["blockers"][0]
     assert "2 boundary correction slots" in payload["blockers"][1]
@@ -637,8 +643,12 @@ def test_physical_readiness_report_allows_completed_embedding_contract(tmp_path)
     payload = adapter.build_physical_readiness_report(tmp_path)
 
     assert payload["backend_artifacts_ready"] is True
+    assert payload["minimal_embedded_closure_ready"] is True
     assert payload["embedded_observable_ready"] is True
+    assert payload["reference_calibrated_correction_ready"] is False
+    assert payload["benchmark_manifest_ready"] is True
     assert payload["reference_benchmark_ready"] is False
+    assert payload["predictive_embedding_ready"] is False
     assert payload["status"] == "embedded_observable_ready"
     assert payload["blockers"] == []
     assert payload["diagnostic_outputs"]["benchmark_ok"] is False
@@ -705,6 +715,9 @@ def test_embedding_benchmark_manifest_compares_reference_observables(tmp_path):
     )
 
     assert payload["reference_label"] == "full-siesta"
+    assert payload["reference_kind"] == "external_reference"
+    assert payload["reference_is_external"] is True
+    assert payload["status"] == "passed"
     assert payload["energy_error_ev"] == -0.25
     assert payload["energy_error_per_atom_ev"] == -0.05
     assert payload["electron_count_error"] == 0.0
@@ -723,6 +736,7 @@ def test_embedding_benchmark_manifest_flags_energy_error(tmp_path):
     )
 
     assert payload["energy_error_ev"] == -2.0
+    assert payload["status"] == "failed"
     assert payload["energy_within_tolerance"] is False
     assert payload["ok"] is False
 
@@ -749,10 +763,33 @@ def test_embedding_benchmark_can_use_reference_workdir(tmp_path):
     )
 
     assert reference_payload["label"] == "full"
+    assert reference_payload["reference_is_external"] is True
     assert reference_payload["total_energy_ev"] == -10.1
     assert payload["reference_label"] == "full"
+    assert payload["reference_kind"] == "external_full_system_or_higher_quality_run"
     assert payload["energy_error_ev"] == 0.09999999999999964
     assert payload["ok"] is True
+
+
+def test_reference_missing_embedding_benchmark_manifest_documents_gap(tmp_path):
+    (tmp_path / "embedded_observables.json").write_text(
+        json.dumps({"embedded_total_energy_ev": -100.0, "corrected_density_overlap_trace": 42.0})
+    )
+    (tmp_path / "global_matrices.json").write_text(json.dumps({"natoms": 386}))
+
+    payload = adapter.write_reference_missing_embedding_benchmark_manifest(
+        tmp_path,
+        reason="full-system TRS2 reference is too expensive for this development host",
+        next_steps=["run a full-system reference on a larger node"],
+    )
+
+    assert payload["status"] == "reference_missing"
+    assert payload["ok"] is False
+    assert payload["reference_is_external"] is False
+    assert payload["natoms"] == 386
+    assert payload["embedded_total_energy_ev"] == -100.0
+    assert "larger node" in payload["next_validation_steps"][0]
+    assert json.loads((tmp_path / "embedding_benchmark.json").read_text()) == payload
 
 
 def test_calibrate_boundary_corrections_to_reference_energy(tmp_path):
@@ -1215,12 +1252,17 @@ def test_write_run_summary_manifest_reports_scaling_metrics(tmp_path):
     assert payload["num_successful_results"] == 2
     assert payload["num_failed_results"] == 0
     assert payload["num_converged_results"] == 2
+    assert payload["success_rate"] == 1.0
+    assert payload["converged_rate"] == 1.0
     assert payload["num_ranks_with_results"] == 2
     assert payload["num_scheduled_ranks"] == 0
     assert payload["machines"] == [0, 1]
     assert payload["total_wall_time_seconds"] == 6.0
     assert payload["max_block_wall_time_seconds"] == 4.0
+    assert payload["max_block_wall_time"] == 4.0
     assert payload["mean_block_wall_time_seconds"] == 3.0
+    assert payload["mean_block_wall_time"] == 3.0
+    assert payload["weak_scaling_efficiency_vs_baseline"] == 1.0
     assert payload["solver_used"] == ["NTPOLY"]
     assert payload["ntpoly_methods"] == [2]
     assert payload["max_scf_steps"] == 9
@@ -1244,6 +1286,8 @@ def test_run_summary_uses_schedule_rank_when_results_are_missing(tmp_path):
     payload = adapter.write_run_summary_manifest(tmp_path)
 
     assert payload["scheduled_ranks"] == [0, 1]
+    assert payload["success_rate"] == 0.0
+    assert payload["converged_rate"] == 0.0
     assert payload["num_ranks_with_results"] == 0
     assert [block["rank"] for block in payload["blocks"]] == [0, 1, 0]
 
@@ -1296,8 +1340,16 @@ def test_write_weak_scaling_report_compares_run_summaries(tmp_path):
 
     assert payload["num_runs"] == 2
     assert payload["baseline_max_block_wall_time_seconds"] == 10.0
+    assert payload["num_blocks"] == 2
+    assert payload["success_rate"] == 1.0
+    assert payload["max_block_wall_time"] == 12.5
+    assert payload["mean_block_wall_time"] == 11.0
+    assert payload["solver_used"] == ["NTPOLY"]
+    assert payload["ntpoly_methods"] == [2]
     assert payload["runs"][0]["weak_scaling_efficiency_vs_baseline"] == 1.0
     assert payload["runs"][1]["weak_scaling_efficiency_vs_baseline"] == 0.8
+    assert payload["runs"][1]["scheduled_ranks"] == []
+    assert payload["runs"][1]["ranks_with_results"] == []
     assert payload["runs"][1]["success_rate"] == 1.0
     assert payload["runs"][1]["solver_used"] == ["NTPOLY"]
     assert payload["runs"][1]["ntpoly_methods"] == [2]
@@ -1344,6 +1396,9 @@ def test_weak_scaling_report_cli(tmp_path):
     assert completed.returncode == 0, completed.stderr
     payload = json.loads(output.read_text())
     assert payload["num_runs"] == 1
+    assert payload["num_blocks"] == 1
+    assert payload["success_rate"] == 1.0
+    assert payload["weak_scaling_efficiency_vs_baseline"] == 1.0
     assert payload["runs"][0]["workdir"] == str(run0)
     assert '"num_runs": 1' in completed.stdout
 
@@ -1940,11 +1995,14 @@ def test_driver_dry_run_writes_manifests_and_aggregate(tmp_path):
     assert len(blocks) == 2
     assert (workdir / "result_rank_0000.json").exists()
     assert json.loads((workdir / "results.json").read_text()) == []
+    assert (workdir / "weak_scaling_report.json").exists()
     schedule = json.loads((workdir / "schedule.json").read_text())
     assert schedule["num_ranks"] == 2
+    assert schedule["total_ranks"] == 2
     assert schedule["block_owner_rank"] == {"0": 0, "1": 1}
     summary = json.loads((workdir / "run_summary.json").read_text())
     assert summary["scheduled_ranks"] == [0, 1]
+    assert summary["success_rate"] == 0.0
     assert summary["num_results"] == 0
     assert [block["rank"] for block in summary["blocks"]] == [0, 1]
 
@@ -2046,6 +2104,7 @@ def test_prepare_siesta_workflow_runs_dry_rank_and_finalize(tmp_path):
     assert (config.workdir / "result_rank_0000.json").exists()
     assert payload["results"] == []
     assert payload["run_summary"]["scheduled_ranks"] == [0, 1]
+    assert payload["weak_scaling_report"]["scheduled_ranks"] == [0, 1]
     assert payload["validation"] is None
 
 
