@@ -182,6 +182,21 @@ Blocks are first assigned to simulated machines with
 machine's blocks are round-robin assigned to `local_rank`, so every rank can run
 one or more local SIESTA tasks instead of leaving all work on `local_rank=0`.
 
+The outer MPI ranks are EWF/Vayesta task runners.  They do not cooperate on one
+SIESTA block.  In the current adapter contract, one outer rank runs one assigned
+block at a time by launching an independent SIESTA subprocess.  Therefore the
+active CPU budget is:
+
+```text
+active SIESTA block subprocesses * EWF_THREADS_PER_PROC
+```
+
+not:
+
+```text
+blocks * ranks-per-block * threads
+```
+
 When launched under MPI, rank 0 generates the block directories and writes
 `blocks.json`, then all ranks enter the scheduling barrier.  Each rank writes
 its own `result_rank_XXXX.json`.  After the execution barrier, rank 0 combines
@@ -192,6 +207,24 @@ Each local SIESTA run is launched as its own subprocess.  The runner strips
 parent MPI launcher variables such as `OMPI_*`, `PMI_*`, and `PMIX_*` from that
 subprocess environment so an MPI-enabled SIESTA binary can initialize as an
 independent singleton task under an outer EWF `mpirun`.
+
+On the current 28-logical-CPU development machine, the 386-atom polyethylene
+diagnostic converged with two large contiguous blocks using:
+
+```text
+EWF_NUM_MACHINES=2
+EWF_PROCS_PER_MACHINE=1
+EWF_THREADS_PER_PROC=2
+EWF_GROUP_SIZE_ATOMS=6
+EWF_BLOCK_GROUPS=32
+EWF_BLOCK_BUFFER_GROUPS=2
+EWF_TERMINAL_CAP_ATOMS=2
+mpirun -np 2
+```
+
+Both blocks used `solver_used=["NTPOLY"]`, `nt_method=2`, and converged in 13
+SCF steps.  This is the recommended local stress-test configuration before
+trying finer weak-scaling partitions on this workstation.
 
 The public collection helpers are:
 

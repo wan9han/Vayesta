@@ -208,7 +208,9 @@ def test_attach_siesta_results_to_fragments_by_block_id():
             overlap_matrix_path=Path("block_0000.HSX"),
             orbital_index_path=Path("block_0000.ORB_INDX"),
             output_path=Path("siesta.out"),
+            matrix_metadata={"elsi": {"solver_used": ["NTPOLY"], "last_solver_settings": {"nt_method": 2}}},
             core_matrix_metadata={"density": {"nnz": 4}},
+            run_diagnostics={"num_scf_steps": 9, "convergence_reason": "scf_converged"},
         ),
         adapter.SiestaEwfResult(
             block_id=1,
@@ -226,7 +228,9 @@ def test_attach_siesta_results_to_fragments_by_block_id():
             overlap_matrix_path=Path("block_0001.HSX"),
             orbital_index_path=Path("block_0001.ORB_INDX"),
             output_path=Path("siesta.out"),
+            matrix_metadata={"elsi": {"solver_used": ["NTPOLY"], "last_solver_settings": {"nt_method": 2}}},
             core_matrix_metadata={"density": {"nnz": 5}},
+            run_diagnostics={"num_scf_steps": 11, "convergence_reason": "scf_converged"},
         ),
     ]
 
@@ -235,8 +239,12 @@ def test_attach_siesta_results_to_fragments_by_block_id():
     assert attached == fragments
     assert fragments[0].siesta_ewf_result.block_id == 1
     assert fragments[0].siesta_rank == 3
+    assert fragments[0].siesta_converged is True
     assert fragments[0].siesta_total_energy_ev == -2.5
     assert fragments[0].siesta_density_matrix_path == Path("block_0001.DM")
+    assert fragments[0].siesta_solver_metadata["solver_used"] == ["NTPOLY"]
+    assert fragments[0].siesta_solver_metadata["last_solver_settings"]["nt_method"] == 2
+    assert fragments[0].siesta_run_diagnostics["num_scf_steps"] == 11
     assert fragments[0].siesta_core_atom_orbital_ranges == {1: (2, 4)}
     assert fragments[0].siesta_core_matrix_metadata == {"density": {"nnz": 5}}
     assert fragments[1].siesta_ewf_result.block_id == 0
@@ -281,6 +289,8 @@ def test_load_siesta_results_to_fragments_projects_run_directory(tmp_path):
                     "orbital_index_path": "x.ORB_INDX",
                     "output_path": "siesta.out",
                     "atom_orbital_ranges": {"0": [0, 2], "1": [2, 4]},
+                    "matrix_metadata": {"elsi": {"solver_used": ["NTPOLY"], "last_solver_settings": {"nt_method": 2}}},
+                    "run_diagnostics": {"num_scf_steps": 13, "convergence_reason": "scf_converged"},
                 }
             ]
         )
@@ -297,6 +307,8 @@ def test_load_siesta_results_to_fragments_projects_run_directory(tmp_path):
     assert fragment.siesta_ewf_result.block_id == 0
     assert fragment.siesta_core_atom_orbital_ranges == {0: (0, 2)}
     assert fragment.siesta_density_matrix_path == Path("x.DM")
+    assert fragment.siesta_solver_metadata["solver_used"] == ["NTPOLY"]
+    assert fragment.siesta_run_diagnostics["num_scf_steps"] == 13
 
 
 def test_generate_block_directories(tmp_path):

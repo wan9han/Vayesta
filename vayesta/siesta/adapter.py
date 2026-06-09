@@ -1152,11 +1152,14 @@ def attach_siesta_results_to_fragments(
         fragment.siesta_ewf_result = result
         fragment.siesta_result_attached = True
         fragment.siesta_rank = result.rank
+        fragment.siesta_converged = result.converged
         fragment.siesta_total_energy_ev = result.total_energy_ev
         fragment.siesta_density_matrix_path = result.density_matrix_path
         fragment.siesta_hamiltonian_matrix_path = result.hamiltonian_matrix_path
         fragment.siesta_overlap_matrix_path = result.overlap_matrix_path
         fragment.siesta_orbital_index_path = result.orbital_index_path
+        fragment.siesta_solver_metadata = dict(result.matrix_metadata.get("elsi", {}))
+        fragment.siesta_run_diagnostics = dict(result.run_diagnostics)
         fragment.siesta_core_atom_orbital_ranges = dict(result.core_atom_orbital_ranges)
         fragment.siesta_core_matrix_metadata = dict(result.core_matrix_metadata)
         attached.append(fragment)
