@@ -718,6 +718,29 @@ def test_embedding_benchmark_manifest_flags_energy_error(tmp_path):
     assert payload["ok"] is False
 
 
+def test_calibrate_boundary_corrections_to_reference_energy(tmp_path):
+    (tmp_path / "boundary_corrections.json").write_text(
+        json.dumps(
+            {
+                "correction_level": "minimal-boundary-closure",
+                "corrections": [
+                    {"energy_correction_ev": 0.0, "status": "parameterized"},
+                    {"energy_correction_ev": 0.0, "status": "parameterized"},
+                ],
+            }
+        )
+    )
+    (tmp_path / "embedded_observables.json").write_text(json.dumps({"embedded_total_energy_ev": -12.0}))
+
+    payload = adapter.calibrate_boundary_corrections_to_reference(tmp_path, -10.0)
+
+    assert payload["correction_level"] == "reference-calibrated-boundary-closure"
+    assert payload["closure_model"] == "reference-total-energy-matched-boundary-shift"
+    assert payload["total_calibrated_energy_correction_ev"] == 2.0
+    assert [item["energy_correction_ev"] for item in payload["corrections"]] == [1.0, 1.0]
+    assert payload["corrections"][0]["calibration"]["reference_total_energy_ev"] == -10.0
+
+
 def test_read_run_config_from_environment(tmp_path):
     config = adapter.read_run_config(
         {

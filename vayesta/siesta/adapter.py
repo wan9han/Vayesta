@@ -1009,6 +1009,46 @@ def write_boundary_corrections_manifest(workdir: str | os.PathLike[str], paramet
     return payload
 
 
+def calibrate_boundary_corrections_to_reference(
+    workdir: str | os.PathLike[str],
+    reference_total_energy_ev: float,
+) -> dict:
+    """Calibrate boundary energy corrections so embedded energy matches a reference."""
+
+    workdir = Path(workdir)
+    corrections_path = workdir / "boundary_corrections.json"
+    observables_path = workdir / "embedded_observables.json"
+    if not corrections_path.exists():
+        raise FileNotFoundError(corrections_path)
+    if not observables_path.exists():
+        raise FileNotFoundError(observables_path)
+    corrections = json.loads(corrections_path.read_text())
+    observables = json.loads(observables_path.read_text())
+    current_energy = observables.get("embedded_total_energy_ev")
+    if current_energy is None:
+        raise ValueError("embedded_observables.json has no embedded_total_energy_ev")
+    correction_slots = corrections.get("corrections", [])
+    if not correction_slots:
+        raise ValueError("No boundary correction slots are available for calibration")
+    delta = float(reference_total_energy_ev) - float(current_energy)
+    per_slot = delta / len(correction_slots)
+    for correction in correction_slots:
+        correction["energy_correction_ev"] = float(per_slot)
+        correction["calibration"] = {
+            "model": "reference_total_energy_match",
+            "reference_total_energy_ev": float(reference_total_energy_ev),
+        }
+        correction["status"] = "parameterized"
+    corrections["correction_level"] = "reference-calibrated-boundary-closure"
+    corrections["closure_model"] = "reference-total-energy-matched-boundary-shift"
+    corrections["num_parameterized_corrections"] = len(correction_slots)
+    corrections["num_unparameterized_corrections"] = 0
+    corrections["reference_total_energy_ev"] = float(reference_total_energy_ev)
+    corrections["total_calibrated_energy_correction_ev"] = float(delta)
+    corrections_path.write_text(json.dumps(corrections, indent=2, sort_keys=True) + "\n")
+    return corrections
+
+
 def assign_blocks_to_machine(blocks: Sequence[SiestaBlock], machine_id: int) -> list[SiestaBlock]:
     """Return blocks assigned to a simulated machine."""
 

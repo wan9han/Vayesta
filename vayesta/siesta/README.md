@@ -242,6 +242,9 @@ block artifacts:
   corrections, and corrected electron-count metadata.
 - `embedding_benchmark.json` optionally compares the closed embedded observable
   against a full-system or higher-accuracy reference observable.
+- `calibrate_boundary_corrections_to_reference(...)` can distribute a known
+  reference energy difference over boundary correction slots.  This is a
+  calibration path, not a predictive self-consistent boundary potential.
 
 When these files are present and validation passes, `physical_readiness.json`
 reports `embedded_observable_ready`.  This is a minimal embedding closure, not a
@@ -270,6 +273,7 @@ The public collection helpers are:
 - `write_global_matrices_manifest(workdir, natoms=None)`: write `global_matrices.json` with the assembled matrix summary.
 - `write_embedded_observables_manifest(workdir)`: write the minimal closed observable manifest.
 - `write_embedding_benchmark_manifest(workdir, reference_observables)`: compare embedded observables with a reference.
+- `calibrate_boundary_corrections_to_reference(workdir, reference_total_energy_ev)`: fit boundary energy corrections to a reference total energy.
 - `summarize_run(workdir)`: build rank/block success, timing, and matrix-size metrics.
 - `write_run_summary_manifest(workdir)`: write those metrics to `run_summary.json`.
 - `compare_weak_scaling_runs(workdirs)`: compare multiple `run_summary.json` files.
