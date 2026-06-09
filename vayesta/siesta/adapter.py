@@ -1852,6 +1852,8 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "corrected_electron_count_deviation": electron.get("corrected_electron_count_deviation"),
             "boundary_correction_level": corrections.get("correction_level"),
             "boundary_closure_model": corrections.get("closure_model"),
+            "boundary_reference_total_energy_ev": corrections.get("reference_total_energy_ev"),
+            "boundary_total_calibrated_energy_correction_ev": corrections.get("total_calibrated_energy_correction_ev"),
             "embedded_total_energy_ev": observables.get("embedded_total_energy_ev"),
             "benchmark_ok": benchmark.get("ok"),
             "benchmark_energy_error_ev": benchmark.get("energy_error_ev"),

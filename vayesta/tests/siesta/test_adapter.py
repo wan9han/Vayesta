@@ -619,7 +619,15 @@ def test_physical_readiness_report_blocks_diagnostic_backend_only_results(tmp_pa
 def test_physical_readiness_report_allows_completed_embedding_contract(tmp_path):
     (tmp_path / "validation.json").write_text(json.dumps({"ok": True}))
     (tmp_path / "embedding_contract.json").write_text(json.dumps({"num_pending_embedding_terms": 0}))
-    (tmp_path / "boundary_corrections.json").write_text(json.dumps({"num_unparameterized_corrections": 0}))
+    (tmp_path / "boundary_corrections.json").write_text(
+        json.dumps(
+            {
+                "num_unparameterized_corrections": 0,
+                "reference_total_energy_ev": -1.2,
+                "total_calibrated_energy_correction_ev": -0.2,
+            }
+        )
+    )
     (tmp_path / "electron_constraint.json").write_text(json.dumps({"chemical_potential_status": "applied"}))
     (tmp_path / "embedded_observables.json").write_text(json.dumps({"embedded_total_energy_ev": -1.0}))
     (tmp_path / "embedding_benchmark.json").write_text(
@@ -635,6 +643,7 @@ def test_physical_readiness_report_allows_completed_embedding_contract(tmp_path)
     assert payload["blockers"] == []
     assert payload["diagnostic_outputs"]["benchmark_ok"] is False
     assert payload["diagnostic_outputs"]["benchmark_energy_error_ev"] == 0.2
+    assert payload["diagnostic_outputs"]["boundary_reference_total_energy_ev"] == -1.2
 
 
 def test_embedded_observables_manifest_combines_energy_and_electron_closure(tmp_path):
