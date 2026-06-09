@@ -812,6 +812,12 @@ def build_blocks_from_config(fdf: FdfInput, config: SiestaRunConfig) -> list[Sie
 def infer_bonds(fdf: FdfInput, tolerance_angstrom: float = 0.45) -> list[dict]:
     """Infer covalent bonds from atom coordinates and species labels."""
 
+    return _infer_bonds_grid(fdf, tolerance_angstrom=tolerance_angstrom)
+
+
+def _infer_bonds_bruteforce(fdf: FdfInput, tolerance_angstrom: float = 0.45) -> list[dict]:
+    """Infer covalent bonds by checking every atom pair."""
+
     bonds = []
     atoms = fdf.atoms
     for i, atom_i in enumerate(atoms):
@@ -821,17 +827,59 @@ def infer_bonds(fdf: FdfInput, tolerance_angstrom: float = 0.45) -> list[dict]:
             distance = _atom_distance(atom_i, atom_j)
             cutoff = radius_i + radius_j + tolerance_angstrom
             if distance <= cutoff:
-                bonds.append(
-                    {
-                        "atom_i": atom_i.global_index,
-                        "atom_j": atom_j.global_index,
-                        "species_i": fdf.species_labels.get(atom_i.species, str(atom_i.species)),
-                        "species_j": fdf.species_labels.get(atom_j.species, str(atom_j.species)),
-                        "distance_angstrom": round(distance, 6),
-                        "cutoff_angstrom": round(cutoff, 6),
-                    }
-                )
+                bonds.append(_bond_record(fdf, atom_i, atom_j, distance, cutoff))
     return bonds
+
+
+def _infer_bonds_grid(fdf: FdfInput, tolerance_angstrom: float = 0.45) -> list[dict]:
+    """Infer covalent bonds using fixed-size spatial bins."""
+
+    atoms = fdf.atoms
+    if not atoms:
+        return []
+    radii = [_covalent_radius(fdf, atom.species) for atom in atoms]
+    cell_size = max(1.0e-12, 2.0 * max(radii) + tolerance_angstrom)
+    bins: dict[tuple[int, int, int], list[int]] = {}
+    for index, atom in enumerate(atoms):
+        bins.setdefault(_atom_cell(atom, cell_size), []).append(index)
+
+    bonds = []
+    for i, atom_i in enumerate(atoms):
+        radius_i = radii[i]
+        cell = _atom_cell(atom_i, cell_size)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    neighbor_cell = (cell[0] + dx, cell[1] + dy, cell[2] + dz)
+                    for j in bins.get(neighbor_cell, []):
+                        if j <= i:
+                            continue
+                        atom_j = atoms[j]
+                        cutoff = radius_i + radii[j] + tolerance_angstrom
+                        distance = _atom_distance(atom_i, atom_j)
+                        if distance <= cutoff:
+                            bonds.append(_bond_record(fdf, atom_i, atom_j, distance, cutoff))
+    bonds.sort(key=lambda bond: (int(bond["atom_i"]), int(bond["atom_j"])))
+    return bonds
+
+
+def _atom_cell(atom: Atom, cell_size: float) -> tuple[int, int, int]:
+    return (
+        math.floor(atom.x / cell_size),
+        math.floor(atom.y / cell_size),
+        math.floor(atom.z / cell_size),
+    )
+
+
+def _bond_record(fdf: FdfInput, atom_i: Atom, atom_j: Atom, distance: float, cutoff: float) -> dict:
+    return {
+        "atom_i": atom_i.global_index,
+        "atom_j": atom_j.global_index,
+        "species_i": fdf.species_labels.get(atom_i.species, str(atom_i.species)),
+        "species_j": fdf.species_labels.get(atom_j.species, str(atom_j.species)),
+        "distance_angstrom": round(distance, 6),
+        "cutoff_angstrom": round(cutoff, 6),
+    }
 
 
 def analyze_block_boundaries(fdf: FdfInput, blocks: Sequence[SiestaBlock]) -> dict:

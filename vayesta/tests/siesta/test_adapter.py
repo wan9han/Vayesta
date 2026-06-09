@@ -416,6 +416,27 @@ def test_infer_bonds_and_boundary_manifest_detects_buffer_coverage(tmp_path):
     assert [(bond["atom_i"], bond["atom_j"]) for bond in uncovered] == [(0, 2)]
 
 
+def test_grid_bond_inference_matches_bruteforce_for_polyethylene_386(tmp_path):
+    repo_root = Path(__file__).resolve().parents[4]
+    completed = subprocess.run(
+        [sys.executable, str(repo_root / "testcases" / "gen.py"), "128"],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    fdf_path = tmp_path / "pe128.fdf"
+    fdf_path.write_text(completed.stdout)
+    fdf = adapter.parse_fdf(fdf_path)
+
+    grid = adapter.infer_bonds(fdf)
+    brute = adapter._infer_bonds_bruteforce(fdf)
+
+    assert [(bond["atom_i"], bond["atom_j"]) for bond in grid] == [
+        (bond["atom_i"], bond["atom_j"]) for bond in brute
+    ]
+
+
 def test_embedding_contract_manifest_records_pending_boundary_corrections(tmp_path):
     boundary_payload = {
         "blocks": [
