@@ -922,6 +922,8 @@ def test_predictive_boundary_corrections_use_returned_dm_hsx_without_reference(t
     assert payload["corrections"][0]["density_hamiltonian_coupling_ev"] == 1.0
     assert payload["corrections"][0]["energy_correction_ev"] == -0.5
     assert payload["corrections"][0]["hamiltonian_embedding_potential"]["value_ev"] == -1.0
+    assert payload["corrections"][0]["sparse_hamiltonian_embedding_potential"]["num_entries"] == 1
+    assert payload["corrections"][0]["sparse_hamiltonian_embedding_potential"]["entries"][0]["value_ev"] == -2.5
     assert payload["sIESTA_external_potential_applied"] is False
     assert potential["source"] == "siesta_returned_dm_hsx"
     assert potential["uses_reference_energy"] is False
@@ -946,8 +948,9 @@ def test_predictive_boundary_corrections_use_returned_dm_hsx_without_reference(t
     siesta_inputs = adapter.write_siesta_embedding_potential_inputs(tmp_path)
 
     assert siesta_inputs["num_blocks_with_potential"] == 1
+    assert siesta_inputs["model"] == "sparse-nonlocal-boundary-shift-v1"
     assert (block_dir / "ewf_embedding_potential.dat").exists()
-    assert "1 1 1 -1.0000000000000000e+00" in (block_dir / "ewf_embedding_potential.dat").read_text()
+    assert "1 2 1 -2.5000000000000000e+00" in (block_dir / "ewf_embedding_potential.dat").read_text()
     assert "EWF.Embedding.PotentialFile   ewf_embedding_potential.dat" in (block_dir / "input.fdf").read_text()
 
 
@@ -993,6 +996,51 @@ def test_read_run_config_from_environment(tmp_path):
     assert config.solver.max_scf_iterations == 180
     assert config.solver.dm_number_pulay == 8
     assert config.solver.dm_mixing_weight == 0.03
+
+
+def test_embedding_rerun_delta_manifest_records_energy_and_applied_diagnostics(tmp_path):
+    (tmp_path / "first_pass_results.json").write_text(
+        json.dumps(
+            [
+                {
+                    "block_id": 0,
+                    "converged": True,
+                    "total_energy_ev": -10.0,
+                    "wall_time_seconds": 2.0,
+                    "run_diagnostics": {"num_scf_steps": 5},
+                }
+            ]
+        )
+    )
+    (tmp_path / "predictive_rerun_results.json").write_text(
+        json.dumps(
+            [
+                {
+                    "block_id": 0,
+                    "converged": True,
+                    "total_energy_ev": -9.5,
+                    "wall_time_seconds": 3.25,
+                    "run_diagnostics": {"num_scf_steps": 7},
+                    "matrix_metadata": {
+                        "ewf_embedding_potential_applied": {
+                            "applied_count": 2,
+                            "skipped_count": 0,
+                            "sum_value_ev": 0.5,
+                        }
+                    },
+                }
+            ]
+        )
+    )
+
+    payload = adapter.write_embedding_rerun_delta_manifest(tmp_path)
+
+    assert payload["all_rerun_blocks_converged"] is True
+    assert payload["all_blocks_have_embedding_potential_applied"] is True
+    assert payload["total_delta_energy_ev"] == 0.5
+    assert payload["blocks"][0]["delta_wall_time_seconds"] == 1.25
+    assert payload["blocks"][0]["delta_scf_steps"] == 2
+    assert payload["blocks"][0]["embedding_potential_applied_diagnostics"]["applied_count"] == 2
 
 
 def test_read_run_config_supports_group_partitioning(tmp_path):

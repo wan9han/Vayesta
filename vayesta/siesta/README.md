@@ -289,8 +289,9 @@ Set `EWF_PREDICTIVE_BOUNDARY=true` to have `SiestaBlockWorkflow.finalize()`
 write the predictive boundary potential and predictive boundary-coupling
 corrections automatically.  Set `EWF_PREDICTIVE_BOUNDARY_RERUN=true` as well
 to run a second SIESTA pass with per-block `EWF.Embedding.PotentialFile`
-inputs.  The current rerun potential is a minimal diagonal core-orbital
-boundary shift, not a full nonlocal production embedding potential.
+inputs.  The current rerun potential is a sparse nonlocal boundary shift
+derived from returned SIESTA DM/HSX coupling terms.  It is still a minimal
+boundary model, not a full production correlated embedding potential.
 
 `SiestaEwfResult` is the first EWF-facing contract.  It keeps the local SIESTA
 matrix file paths and scalar status, but only assigns ownership to core atoms:

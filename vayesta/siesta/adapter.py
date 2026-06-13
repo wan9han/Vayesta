@@ -506,6 +506,16 @@ class SiestaBlockWorkflow:
 
         return write_siesta_embedding_potential_inputs(self.config.workdir)
 
+    def snapshot_results(self, label: str) -> dict:
+        """Save the current rank/result manifests under a phase label."""
+
+        return write_results_snapshot_manifest(self.config.workdir, label)
+
+    def write_embedding_rerun_delta(self) -> dict:
+        """Write first-pass versus predictive-rerun diagnostics."""
+
+        return write_embedding_rerun_delta_manifest(self.config.workdir)
+
 
 @dataclasses.dataclass(frozen=True)
 class SiestaEwfResult:
@@ -1161,6 +1171,11 @@ def build_predictive_boundary_potential(
             * coupling["density_hamiltonian_coupling_ev"]
             / max(1, int(coupling["num_core_orbitals"]))
         )
+        sparse_entries = []
+        for entry in coupling["sparse_hamiltonian_embedding_entries"]:
+            scaled = dict(entry)
+            scaled["value_ev"] = float(damping * scaled["value_ev"])
+            sparse_entries.append(scaled)
         total_energy_correction += energy_correction
         terms.append(
             {
@@ -1177,6 +1192,13 @@ def build_predictive_boundary_potential(
                 "num_coupling_entries": coupling["num_coupling_entries"],
                 "density_hamiltonian_coupling_ev": coupling["density_hamiltonian_coupling_ev"],
                 "density_overlap_population": coupling["density_overlap_population"],
+                "sparse_hamiltonian_embedding_potential": {
+                    "model": "boundary-hsx-nonlocal-shift-v1",
+                    "scope": "core_environment_sparse_couplings",
+                    "entries": sparse_entries,
+                    "num_entries": len(sparse_entries),
+                    "applied_to_siesta_input": False,
+                },
                 "hamiltonian_embedding_potential": {
                     "model": "average_core_boundary_shift_from_density_hamiltonian_coupling",
                     "value_ev": potential_value,
@@ -1262,6 +1284,7 @@ def write_predictive_boundary_corrections_manifest(
                 "source": term["source"],
                 "density_hamiltonian_coupling_ev": term["density_hamiltonian_coupling_ev"],
                 "density_overlap_population": term["density_overlap_population"],
+                "sparse_hamiltonian_embedding_potential": term.get("sparse_hamiltonian_embedding_potential"),
             }
         )
     payload = {
@@ -1305,6 +1328,8 @@ def write_siesta_embedding_potential_inputs(workdir: str | os.PathLike[str]) -> 
             for atom, bounds in result.get("atom_orbital_ranges", {}).items()
         }
         entries: dict[tuple[int, int, int], float] = {}
+        diagonal_fallback_terms = 0
+        sparse_terms = 0
         for term in potential.get("terms", []):
             if int(term.get("block_id", -1)) != block_id or term.get("status") != "parameterized":
                 continue
@@ -1312,6 +1337,15 @@ def write_siesta_embedding_potential_inputs(workdir: str | os.PathLike[str]) -> 
             if core_atom not in atom_ranges:
                 skipped_terms.append({"block_id": block_id, "core_atom": core_atom, "reason": "missing_orbital_range"})
                 continue
+            sparse_potential = term.get("sparse_hamiltonian_embedding_potential") or {}
+            sparse_entries = sparse_potential.get("entries") or []
+            if sparse_entries:
+                sparse_terms += 1
+                for entry in sparse_entries:
+                    key = (int(entry["row"]) + 1, int(entry["col"]) + 1, int(entry["spin"]) + 1)
+                    entries[key] = entries.get(key, 0.0) + float(entry["value_ev"])
+                continue
+            diagonal_fallback_terms += 1
             value = float(term["hamiltonian_embedding_potential"]["value_ev"])
             start, end = atom_ranges[core_atom]
             nspin = max(1, _nspin_hamiltonian_from_result(result))
@@ -1336,11 +1370,14 @@ def write_siesta_embedding_potential_inputs(workdir: str | os.PathLike[str]) -> 
                 "potential_file": str(potential_path),
                 "num_entries": len(entries),
                 "sum_value_ev": float(sum(entries.values())),
+                "num_sparse_terms": sparse_terms,
+                "num_diagonal_fallback_terms": diagonal_fallback_terms,
             }
         )
     payload = {
         "version": 1,
-        "model": "diagonal-core-orbital-boundary-shift-v1",
+        "model": "sparse-nonlocal-boundary-shift-v1",
+        "fallback_model": "diagonal-core-orbital-boundary-shift-v1",
         "source": "predictive_embedding_potential.json",
         "sIESTA_fdf_key": "EWF.Embedding.PotentialFile",
         "num_blocks_with_potential": len(written_blocks),
@@ -1658,6 +1695,9 @@ def read_siesta_output(block_dir: str | os.PathLike[str]) -> SiestaResult:
     elsi_metadata = _read_elsi_log_metadata(block_dir / "elsi_log.json")
     if elsi_metadata:
         matrix_metadata["elsi"] = elsi_metadata
+    embedding_applied = _read_optional_json(block_dir / "ewf_embedding_potential_applied.json")
+    if embedding_applied:
+        matrix_metadata["ewf_embedding_potential_applied"] = embedding_applied
     if not output_path.exists():
         return SiestaResult(
             block_id=block_id,
@@ -1716,6 +1756,89 @@ def write_results_manifest(workdir: str | os.PathLike[str]) -> list[dict]:
     workdir = Path(workdir)
     payload = collect_rank_results(workdir)
     (workdir / "results.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
+def write_results_snapshot_manifest(workdir: str | os.PathLike[str], label: str) -> dict:
+    """Save current result manifests under a stable phase label."""
+
+    workdir = Path(workdir)
+    safe_label = label.strip().replace("-", "_")
+    results = collect_rank_results(workdir)
+    result_path = workdir / f"{safe_label}_results.json"
+    result_path.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n")
+    rank_paths = []
+    for result_path_in in sorted(workdir.glob("result_rank_*.json")):
+        result_path_out = workdir / f"{safe_label}_{result_path_in.name}"
+        shutil.copy2(result_path_in, result_path_out)
+        rank_paths.append(str(result_path_out))
+    payload = {
+        "version": 1,
+        "label": safe_label,
+        "num_results": len(results),
+        "results_path": str(result_path),
+        "rank_result_paths": rank_paths,
+    }
+    (workdir / f"{safe_label}_results_manifest.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    )
+    return payload
+
+
+def write_embedding_rerun_delta_manifest(workdir: str | os.PathLike[str]) -> dict:
+    """Compare first-pass block results with predictive rerun results."""
+
+    workdir = Path(workdir)
+    first_path = workdir / "first_pass_results.json"
+    rerun_path = workdir / "predictive_rerun_results.json"
+    if not first_path.exists():
+        raise FileNotFoundError(first_path)
+    if not rerun_path.exists():
+        raise FileNotFoundError(rerun_path)
+    first = {int(item["block_id"]): item for item in json.loads(first_path.read_text())}
+    rerun = {int(item["block_id"]): item for item in json.loads(rerun_path.read_text())}
+    blocks = []
+    for block_id in sorted(set(first) | set(rerun)):
+        before = first.get(block_id, {})
+        after = rerun.get(block_id, {})
+        before_energy = before.get("total_energy_ev")
+        after_energy = after.get("total_energy_ev")
+        before_wall = before.get("wall_time_seconds")
+        after_wall = after.get("wall_time_seconds")
+        before_scf = before.get("run_diagnostics", {}).get("num_scf_steps")
+        after_scf = after.get("run_diagnostics", {}).get("num_scf_steps")
+        applied = after.get("matrix_metadata", {}).get("ewf_embedding_potential_applied", {})
+        blocks.append(
+            {
+                "block_id": block_id,
+                "first_pass_converged": before.get("converged"),
+                "predictive_rerun_converged": after.get("converged"),
+                "first_pass_total_energy_ev": before_energy,
+                "predictive_rerun_total_energy_ev": after_energy,
+                "delta_total_energy_ev": _difference(after_energy, before_energy),
+                "first_pass_wall_time_seconds": before_wall,
+                "predictive_rerun_wall_time_seconds": after_wall,
+                "delta_wall_time_seconds": _difference(after_wall, before_wall),
+                "first_pass_scf_steps": before_scf,
+                "predictive_rerun_scf_steps": after_scf,
+                "delta_scf_steps": None
+                if before_scf is None or after_scf is None
+                else int(after_scf) - int(before_scf),
+                "embedding_potential_applied": bool(applied),
+                "embedding_potential_applied_diagnostics": applied,
+            }
+        )
+    energy_deltas = [block["delta_total_energy_ev"] for block in blocks if block["delta_total_energy_ev"] is not None]
+    payload = {
+        "version": 1,
+        "model": "first-pass-vs-predictive-rerun",
+        "num_blocks": len(blocks),
+        "all_rerun_blocks_converged": all(block["predictive_rerun_converged"] is True for block in blocks),
+        "all_blocks_have_embedding_potential_applied": all(block["embedding_potential_applied"] for block in blocks),
+        "total_delta_energy_ev": float(sum(energy_deltas)) if energy_deltas else None,
+        "blocks": blocks,
+    }
+    (workdir / "embedding_rerun_delta.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return payload
 
 
@@ -3080,6 +3203,7 @@ def _compute_boundary_coupling_from_result(result: dict, core_atom: int, environ
             "num_coupling_entries": 0,
             "density_hamiltonian_coupling_ev": 0.0,
             "density_overlap_population": 0.0,
+            "sparse_hamiltonian_embedding_entries": [],
         }
     dm_lookup = {
         (int(row), int(col)): index
@@ -3088,6 +3212,7 @@ def _compute_boundary_coupling_from_result(result: dict, core_atom: int, environ
     coupling = 0.0
     overlap_population = 0.0
     num_entries = 0
+    sparse_entries = []
     for hsx_index in np.nonzero(crossing)[0]:
         key = (int(hsx.rows[hsx_index]), int(hsx.cols[hsx_index]))
         dm_index = dm_lookup.get(key)
@@ -3097,6 +3222,21 @@ def _compute_boundary_coupling_from_result(result: dict, core_atom: int, environ
         if nspin:
             coupling += float(np.dot(dm.density[:nspin, dm_index], hsx.hamiltonian[:nspin, hsx_index]))
             overlap_population += float(np.sum(dm.density[:nspin, dm_index]) * hsx.overlap[hsx_index])
+            for spin in range(nspin):
+                density_value = float(dm.density[spin, dm_index])
+                hamiltonian_value = float(hsx.hamiltonian[spin, hsx_index])
+                if density_value == 0.0 and hamiltonian_value == 0.0:
+                    continue
+                sparse_entries.append(
+                    {
+                        "row": int(hsx.rows[hsx_index]),
+                        "col": int(hsx.cols[hsx_index]),
+                        "spin": int(spin),
+                        "density": density_value,
+                        "source_hamiltonian_ev": hamiltonian_value,
+                        "value_ev": float(-0.5 * hamiltonian_value),
+                    }
+                )
             num_entries += 1
     return {
         "num_core_orbitals": core_range[1] - core_range[0],
@@ -3104,6 +3244,7 @@ def _compute_boundary_coupling_from_result(result: dict, core_atom: int, environ
         "num_coupling_entries": num_entries,
         "density_hamiltonian_coupling_ev": float(coupling),
         "density_overlap_population": float(overlap_population),
+        "sparse_hamiltonian_embedding_entries": sparse_entries,
     }
 
 

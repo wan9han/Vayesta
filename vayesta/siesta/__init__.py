@@ -77,6 +77,8 @@ from vayesta.siesta.adapter import (
     write_validation_manifest,
     write_weak_scaling_report,
     write_results_manifest,
+    write_results_snapshot_manifest,
+    write_embedding_rerun_delta_manifest,
 )
 
 __all__ = [
@@ -156,4 +158,6 @@ __all__ = [
     "write_validation_manifest",
     "write_weak_scaling_report",
     "write_results_manifest",
+    "write_results_snapshot_manifest",
+    "write_embedding_rerun_delta_manifest",
 ]
