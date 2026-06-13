@@ -132,6 +132,8 @@ class SiestaRunConfig:
     buffer_groups: int
     terminal_cap_atoms: int
     dry_run: bool
+    predictive_boundary: bool = False
+    predictive_boundary_damping: float = 1.0
     solver: SiestaSolverConfig = dataclasses.field(default_factory=SiestaSolverConfig)
 
 
@@ -479,6 +481,15 @@ class SiestaBlockWorkflow:
                 self.config.workdir,
                 self.fdf,
             )
+            if self.config.predictive_boundary:
+                payload["predictive_embedding_potential"] = write_predictive_boundary_potential_manifest(
+                    self.config.workdir,
+                    damping=self.config.predictive_boundary_damping,
+                )
+                payload["boundary_corrections"] = write_predictive_boundary_corrections_manifest(
+                    self.config.workdir,
+                    damping=self.config.predictive_boundary_damping,
+                )
             payload["embedded_observables"] = write_embedded_observables_manifest(self.config.workdir)
             payload["validation"] = write_validation_manifest(
                 self.config.workdir,
@@ -1494,6 +1505,8 @@ def read_run_config(environ: dict[str, str] | None = None) -> SiestaRunConfig:
         buffer_groups=_get_nonnegative_int(environ, "EWF_BLOCK_BUFFER_GROUPS", 0),
         terminal_cap_atoms=_get_nonnegative_int(environ, "EWF_TERMINAL_CAP_ATOMS", 0),
         dry_run=_get_bool(environ, "EWF_SIESTA_DRY_RUN", True),
+        predictive_boundary=_get_bool(environ, "EWF_PREDICTIVE_BOUNDARY", False),
+        predictive_boundary_damping=_get_positive_float(environ, "EWF_PREDICTIVE_BOUNDARY_DAMPING", 1.0),
         solver=solver,
     )
 

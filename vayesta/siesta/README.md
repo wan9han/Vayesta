@@ -285,6 +285,11 @@ The public collection helpers are:
 - `compare_weak_scaling_runs(workdirs)`: compare multiple `run_summary.json` files.
 - `write_weak_scaling_report(output_path, workdirs)`: write a multi-run weak-scaling report.
 
+Set `EWF_PREDICTIVE_BOUNDARY=true` to have `SiestaBlockWorkflow.finalize()`
+write the predictive boundary potential and predictive boundary-coupling
+corrections automatically.  This remains a single-shot, non-reference closure
+until a SIESTA external Hamiltonian-potential injection path is connected.
+
 `SiestaEwfResult` is the first EWF-facing contract.  It keeps the local SIESTA
 matrix file paths and scalar status, but only assigns ownership to core atoms:
 

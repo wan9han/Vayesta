@@ -943,6 +943,8 @@ def test_read_run_config_from_environment(tmp_path):
             "EWF_MAX_SCF_ITERATIONS": "180",
             "EWF_DM_NUMBER_PULAY": "8",
             "EWF_DM_MIXING_WEIGHT": "0.03",
+            "EWF_PREDICTIVE_BOUNDARY": "true",
+            "EWF_PREDICTIVE_BOUNDARY_DAMPING": "0.25",
         }
     )
 
@@ -957,6 +959,8 @@ def test_read_run_config_from_environment(tmp_path):
     assert config.group_size_atoms is None
     assert config.buffer_groups == 0
     assert config.dry_run is False
+    assert config.predictive_boundary is True
+    assert config.predictive_boundary_damping == 0.25
     assert config.solver.ntpoly_method == 2
     assert config.solver.ntpoly_filter == 1.0e-8
     assert config.solver.ntpoly_tolerance == 1.0e-5
