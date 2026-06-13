@@ -1296,6 +1296,109 @@ def test_write_run_summary_manifest_reports_scaling_metrics(tmp_path):
     assert json.loads((tmp_path / "run_summary.json").read_text()) == payload
 
 
+def test_write_matrix_shape_report_records_per_rank_mnk_and_partition_quality(tmp_path):
+    blocks = adapter.partition_contiguous_atoms(20, block_atoms=10, buffer_atoms=2, num_machines=2)
+    adapter.write_schedule_manifest(tmp_path, blocks, num_machines=2, procs_per_machine=1, threads_per_proc=3)
+    (tmp_path / "blocks.json").write_text(
+        json.dumps([block.to_metadata(list(range(block.input_atom_start, block.input_atom_end))) for block in blocks])
+    )
+    (tmp_path / "results.json").write_text(
+        json.dumps(
+            [
+                {
+                    "block_id": 0,
+                    "rank": 0,
+                    "returncode": 0,
+                    "converged": True,
+                    "wall_time_seconds": 2.0,
+                    "matrix_metadata": {
+                        "density": {"norbitals": 60},
+                        "hamiltonian_overlap": {"norbitals": 60},
+                        "elsi": {"solver_used": ["NTPOLY"], "last_solver_settings": {"nt_method": 2}},
+                    },
+                    "run_diagnostics": {"num_scf_steps": 8},
+                },
+                {
+                    "block_id": 1,
+                    "rank": 1,
+                    "returncode": 0,
+                    "converged": True,
+                    "wall_time_seconds": 3.0,
+                    "matrix_metadata": {
+                        "density": {"norbitals": 60},
+                        "hamiltonian_overlap": {"norbitals": 60},
+                        "elsi": {"solver_used": ["NTPOLY"], "last_solver_settings": {"nt_method": 2}},
+                    },
+                    "run_diagnostics": {"num_scf_steps": 9},
+                },
+            ]
+        )
+    )
+    (tmp_path / "ewf_results.json").write_text(
+        json.dumps(
+            [
+                {"block_id": 0, "core_matrix_metadata": {"density": {"norbitals": 50, "nnz": 200}}},
+                {"block_id": 1, "core_matrix_metadata": {"density": {"norbitals": 50, "nnz": 210}}},
+            ]
+        )
+    )
+    (tmp_path / "global_matrices.json").write_text(json.dumps({"norbitals": 100, "nnz": 410}))
+
+    payload = adapter.write_matrix_shape_report_manifest(tmp_path)
+
+    assert payload["global_core_norbitals"] == 100
+    assert payload["max_local_norbitals"] == 60
+    assert payload["local_vs_global_norbital_ratio"] == 0.6
+    assert payload["local_balance_ratio_max_over_mean"] == 1.0
+    assert payload["effective_partition"] == "effective_and_balanced"
+    assert payload["blocks"][0]["local_matrix"]["m"] == 60
+    assert payload["blocks"][0]["local_matrix"]["n"] == 60
+    assert payload["blocks"][0]["local_matrix"]["k"] == 60
+    assert payload["blocks"][0]["core_matrix"]["m"] == 50
+    assert payload["blocks"][0]["buffer_orbital_amplification"] == 1.2
+    assert payload["blocks"][1]["threads_per_proc"] == 3
+    assert payload["ranks"][0]["max_local_m"] == 60
+    assert payload["ranks"][0]["sum_dense_equivalent_gemm_flops"] == 432000
+    assert json.loads((tmp_path / "matrix_shape_report.json").read_text()) == payload
+
+
+def test_matrix_shape_report_reads_local_sparse_nnz_from_matrix_files(tmp_path):
+    dm_path = tmp_path / "block_0000.DM"
+    hsx_path = tmp_path / "block_0000.HSX"
+    _write_full_dm(dm_path, [2, 1], [[1, 2], [2]], [[[1.0, 0.1], [2.0]]])
+    _write_full_hsx(hsx_path, [2, 1], [[1, 2], [2]], [[[1.0, 0.1], [2.0]]], [[1.0, 0.0], [1.0]])
+    blocks = adapter.partition_contiguous_atoms(2, block_atoms=2)
+    adapter.write_schedule_manifest(tmp_path, blocks, num_machines=1, procs_per_machine=1)
+    (tmp_path / "blocks.json").write_text(
+        json.dumps([blocks[0].to_metadata([0, 1])])
+    )
+    (tmp_path / "results.json").write_text(
+        json.dumps(
+            [
+                {
+                    "block_id": 0,
+                    "rank": 0,
+                    "returncode": 0,
+                    "converged": True,
+                    "density_matrix_path": str(dm_path),
+                    "hamiltonian_matrix_path": str(hsx_path),
+                    "matrix_metadata": {
+                        "density": {"norbitals": 2},
+                        "hamiltonian_overlap": {"norbitals": 2},
+                    },
+                }
+            ]
+        )
+    )
+
+    payload = adapter.write_matrix_shape_report_manifest(tmp_path)
+
+    assert payload["blocks"][0]["local_matrix"]["m"] == 2
+    assert payload["blocks"][0]["local_matrix"]["nnz"] == 3
+    assert payload["blocks"][0]["local_matrix"]["sparse_fill_fraction"] == 0.75
+    assert payload["ranks"][0]["sum_local_sparse_nnz"] == 3
+
+
 def test_run_summary_uses_schedule_rank_when_results_are_missing(tmp_path):
     blocks = adapter.partition_contiguous_atoms(12, block_atoms=4, buffer_atoms=0, num_machines=2)
     adapter.write_schedule_manifest(tmp_path, blocks, num_machines=2, procs_per_machine=1)

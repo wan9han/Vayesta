@@ -449,6 +449,7 @@ class SiestaBlockWorkflow:
         payload = {
             "results": write_results_manifest(self.config.workdir),
             "run_summary": write_run_summary_manifest(self.config.workdir),
+            "matrix_shape_report": None,
             "weak_scaling_report": None,
             "validation": None,
             "ewf_results": None,
@@ -457,6 +458,7 @@ class SiestaBlockWorkflow:
             "embedded_observables": None,
             "physical_readiness": None,
         }
+        payload["matrix_shape_report"] = write_matrix_shape_report_manifest(self.config.workdir)
         payload["weak_scaling_report"] = write_weak_scaling_report(
             self.config.workdir / "weak_scaling_report.json",
             [self.config.workdir],
@@ -472,6 +474,7 @@ class SiestaBlockWorkflow:
         if validation["ok"]:
             payload["ewf_results"] = write_ewf_results_manifest(self.config.workdir)
             payload["global_matrices"] = write_global_matrices_manifest(self.config.workdir, natoms=self.natoms)
+            payload["matrix_shape_report"] = write_matrix_shape_report_manifest(self.config.workdir)
             payload["electron_constraint"] = write_electron_constraint_manifest(
                 self.config.workdir,
                 self.fdf,
@@ -1540,6 +1543,74 @@ def write_run_summary_manifest(workdir: str | os.PathLike[str]) -> dict:
     return payload
 
 
+def build_matrix_shape_report(workdir: str | os.PathLike[str]) -> dict:
+    """Build per-rank/block local matrix MNK and partition quality diagnostics."""
+
+    workdir = Path(workdir)
+    blocks = _read_json_list(workdir / "blocks.json")
+    results = _read_json_list(workdir / "results.json") if (workdir / "results.json").exists() else collect_rank_results(workdir)
+    ewf_results = _read_json_list(workdir / "ewf_results.json") if (workdir / "ewf_results.json").exists() else []
+    schedule = _read_optional_json(workdir / "schedule.json") or {}
+    global_matrices = _read_optional_json(workdir / "global_matrices.json") or {}
+    results_by_block = {int(result["block_id"]): result for result in results}
+    ewf_by_block = {int(result["block_id"]): result for result in ewf_results}
+    schedule_owner = _read_schedule_owner_ranks(workdir)
+    threads_per_proc = schedule.get("threads_per_proc")
+
+    block_entries = [
+        _matrix_shape_block_entry(
+            block,
+            results_by_block.get(int(block["block_id"])),
+            ewf_by_block.get(int(block["block_id"])),
+            schedule_owner.get(int(block["block_id"])),
+            threads_per_proc,
+        )
+        for block in blocks
+    ]
+    rank_entries = _matrix_shape_rank_entries(block_entries, schedule)
+    local_norbitals = [entry["local_matrix"]["m"] for entry in block_entries if entry["local_matrix"]["m"] is not None]
+    core_norbitals = [entry["core_matrix"]["m"] for entry in block_entries if entry["core_matrix"]["m"] is not None]
+    global_norbitals = global_matrices.get("norbitals")
+    max_local = max(local_norbitals) if local_norbitals else None
+    mean_local = float(sum(local_norbitals) / len(local_norbitals)) if local_norbitals else None
+    max_core = max(core_norbitals) if core_norbitals else None
+    effective_reduction = None
+    if global_norbitals and max_local:
+        effective_reduction = float(max_local / global_norbitals)
+    balance_ratio = None
+    if local_norbitals and mean_local:
+        balance_ratio = float(max_local / mean_local)
+    return {
+        "version": 1,
+        "workdir": str(workdir),
+        "matrix_shape_model": "square-local-sparse-scf-matrix",
+        "mnk_convention": "For each SIESTA block, dense-equivalent M=N=K=local_norbitals. Core MNK uses core-owned orbitals after EWF projection.",
+        "num_blocks": len(block_entries),
+        "num_ranks": schedule.get("num_ranks"),
+        "threads_per_proc": threads_per_proc,
+        "global_core_norbitals": global_norbitals,
+        "global_core_nnz": global_matrices.get("nnz"),
+        "max_local_norbitals": max_local,
+        "mean_local_norbitals": mean_local,
+        "max_core_norbitals": max_core,
+        "local_vs_global_norbital_ratio": effective_reduction,
+        "local_balance_ratio_max_over_mean": balance_ratio,
+        "effective_partition": _effective_partition_label(effective_reduction, balance_ratio),
+        "analysis": _matrix_shape_analysis(effective_reduction, balance_ratio, block_entries),
+        "blocks": block_entries,
+        "ranks": rank_entries,
+    }
+
+
+def write_matrix_shape_report_manifest(workdir: str | os.PathLike[str]) -> dict:
+    """Write `matrix_shape_report.json` with per-process local matrix sizes."""
+
+    workdir = Path(workdir)
+    payload = build_matrix_shape_report(workdir)
+    (workdir / "matrix_shape_report.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
 def compare_weak_scaling_runs(workdirs: Sequence[str | os.PathLike[str]]) -> dict:
     """Compare multiple `run_summary.json` files for weak-scaling analysis."""
 
@@ -2550,6 +2621,184 @@ def _summarize_max_scf_steps(results: Sequence[dict]) -> int | None:
         if result.get("run_diagnostics", {}).get("num_scf_steps") is not None
     ]
     return None if not steps else max(steps)
+
+
+def _matrix_shape_block_entry(
+    block: dict,
+    result: dict | None,
+    ewf_result: dict | None,
+    scheduled_rank: int | None,
+    threads_per_proc: int | None,
+) -> dict:
+    core_start = int(block["core_atom_start"])
+    core_end = int(block["core_atom_end"])
+    input_start = int(block["input_atom_start"])
+    input_end = int(block["input_atom_end"])
+    rank = scheduled_rank if result is None else result.get("rank", scheduled_rank)
+    matrix_metadata = {} if result is None else result.get("matrix_metadata", {})
+    density = matrix_metadata.get("density", {})
+    hsx = matrix_metadata.get("hamiltonian_overlap", {})
+    local_norbitals = _first_int(hsx.get("norbitals"), density.get("norbitals"))
+    local_nnz = _first_int(hsx.get("nnz"), density.get("nnz"))
+    if local_nnz is None and result is not None:
+        local_nnz = _read_local_matrix_nnz(result)
+    core_metadata = {} if ewf_result is None else ewf_result.get("core_matrix_metadata", {})
+    core_density = core_metadata.get("density", {})
+    core_hsx = core_metadata.get("hamiltonian_overlap", {})
+    core_norbitals = _first_int(core_hsx.get("norbitals"), core_density.get("norbitals"))
+    core_nnz = _first_int(core_hsx.get("nnz"), core_density.get("nnz"))
+    return {
+        "block_id": int(block["block_id"]),
+        "rank": rank,
+        "machine_id": block.get("machine_id"),
+        "threads_per_proc": threads_per_proc,
+        "core_atom_range": [core_start, core_end],
+        "input_atom_range": [input_start, input_end],
+        "core_atoms": core_end - core_start,
+        "input_atoms": input_end - input_start,
+        "buffer_atoms": (core_start - input_start) + (input_end - core_end),
+        "local_matrix": _square_mnk(local_norbitals, local_nnz),
+        "core_matrix": _square_mnk(core_norbitals, core_nnz),
+        "buffer_orbital_amplification": _ratio(local_norbitals, core_norbitals),
+        "returncode": None if result is None else result.get("returncode"),
+        "converged": None if result is None else result.get("converged"),
+        "wall_time_seconds": None if result is None else result.get("wall_time_seconds"),
+        "solver_used": [] if result is None else matrix_metadata.get("elsi", {}).get("solver_used", []),
+        "ntpoly_method": None if result is None else matrix_metadata.get("elsi", {}).get("last_solver_settings", {}).get("nt_method"),
+        "num_scf_steps": None if result is None else result.get("run_diagnostics", {}).get("num_scf_steps"),
+    }
+
+
+def _matrix_shape_rank_entries(block_entries: Sequence[dict], schedule: dict) -> list[dict]:
+    ranks = {
+        int(rank_info["rank"]): {
+            "rank": int(rank_info["rank"]),
+            "machine_id": rank_info.get("machine_id"),
+            "local_rank": rank_info.get("local_rank"),
+            "scheduled_block_ids": list(rank_info.get("block_ids", [])),
+            "completed_block_ids": [],
+            "num_scheduled_blocks": int(rank_info.get("num_blocks", 0)),
+            "num_completed_blocks": 0,
+            "max_local_m": None,
+            "max_local_n": None,
+            "max_local_k": None,
+            "sum_dense_equivalent_gemm_flops": 0,
+            "sum_local_sparse_nnz": 0,
+        }
+        for rank_info in schedule.get("ranks", [])
+    }
+    for entry in block_entries:
+        rank = entry.get("rank")
+        if rank is None:
+            continue
+        rank = int(rank)
+        ranks.setdefault(
+            rank,
+            {
+                "rank": rank,
+                "machine_id": entry.get("machine_id"),
+                "local_rank": None,
+                "scheduled_block_ids": [],
+                "completed_block_ids": [],
+                "num_scheduled_blocks": 0,
+                "num_completed_blocks": 0,
+                "max_local_m": None,
+                "max_local_n": None,
+                "max_local_k": None,
+                "sum_dense_equivalent_gemm_flops": 0,
+                "sum_local_sparse_nnz": 0,
+            },
+        )
+        rank_entry = ranks[rank]
+        rank_entry["completed_block_ids"].append(entry["block_id"])
+        rank_entry["num_completed_blocks"] += 1
+        local = entry["local_matrix"]
+        for axis, key in (("m", "max_local_m"), ("n", "max_local_n"), ("k", "max_local_k")):
+            value = local.get(axis)
+            if value is not None:
+                rank_entry[key] = value if rank_entry[key] is None else max(rank_entry[key], value)
+        if local.get("dense_equivalent_gemm_flops") is not None:
+            rank_entry["sum_dense_equivalent_gemm_flops"] += int(local["dense_equivalent_gemm_flops"])
+        if local.get("nnz") is not None:
+            rank_entry["sum_local_sparse_nnz"] += int(local["nnz"])
+    return [ranks[key] for key in sorted(ranks)]
+
+
+def _read_local_matrix_nnz(result: dict) -> int | None:
+    for key, reader in (
+        ("hamiltonian_matrix_path", read_hsx_sparse),
+        ("density_matrix_path", read_density_matrix_sparse),
+    ):
+        path = _str_to_path(result.get(key))
+        if path is None or not path.exists():
+            continue
+        try:
+            return int(reader(path).nnz)
+        except Exception:
+            continue
+    return None
+
+
+def _square_mnk(norbitals: int | None, nnz: int | None = None) -> dict:
+    if norbitals is None:
+        return {
+            "m": None,
+            "n": None,
+            "k": None,
+            "nnz": nnz,
+            "dense_equivalent_gemm_flops": None,
+            "sparse_fill_fraction": None,
+        }
+    dense_entries = int(norbitals) * int(norbitals)
+    return {
+        "m": int(norbitals),
+        "n": int(norbitals),
+        "k": int(norbitals),
+        "nnz": nnz,
+        "dense_equivalent_gemm_flops": int(2 * int(norbitals) * int(norbitals) * int(norbitals)),
+        "sparse_fill_fraction": None if nnz is None or dense_entries == 0 else float(nnz / dense_entries),
+    }
+
+
+def _effective_partition_label(local_vs_global_ratio: float | None, balance_ratio: float | None) -> str:
+    if local_vs_global_ratio is None:
+        return "insufficient_global_reference"
+    if local_vs_global_ratio < 0.75 and (balance_ratio is None or balance_ratio <= 1.2):
+        return "effective_and_balanced"
+    if local_vs_global_ratio < 0.75:
+        return "effective_but_imbalanced"
+    if balance_ratio is not None and balance_ratio > 1.2:
+        return "weak_or_imbalanced"
+    return "weak_partition_reduction"
+
+
+def _matrix_shape_analysis(local_vs_global_ratio: float | None, balance_ratio: float | None, block_entries: Sequence[dict]) -> dict:
+    amplification = [
+        float(entry["buffer_orbital_amplification"])
+        for entry in block_entries
+        if entry.get("buffer_orbital_amplification") is not None
+    ]
+    return {
+        "local_matrix_reduction_present": None if local_vs_global_ratio is None else local_vs_global_ratio < 1.0,
+        "strong_local_reduction": None if local_vs_global_ratio is None else local_vs_global_ratio < 0.75,
+        "rank_balance_good": None if balance_ratio is None else balance_ratio <= 1.2,
+        "max_buffer_orbital_amplification": None if not amplification else max(amplification),
+        "mean_buffer_orbital_amplification": None if not amplification else float(sum(amplification) / len(amplification)),
+        "interpretation": (
+            "Global core norbital count is unavailable; compare per-block M/N/K only."
+            if local_vs_global_ratio is None
+            else "Each SIESTA rank sees a smaller square matrix than the assembled global core matrix."
+            if local_vs_global_ratio < 1.0
+            else "The largest local SIESTA matrix is not smaller than the assembled global core matrix."
+        ),
+    }
+
+
+def _first_int(*values) -> int | None:
+    for value in values:
+        if value is not None:
+            return int(value)
+    return None
 
 
 def _load_or_create_run_summary(workdir: Path) -> dict:

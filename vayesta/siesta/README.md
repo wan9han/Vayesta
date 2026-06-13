@@ -271,6 +271,8 @@ The public collection helpers are:
 - `write_ewf_results_manifest(workdir)`: write `ewf_results.json` with core-owned `SiestaEwfResult` metadata.
 - `assemble_global_matrices(workdir_or_results, natoms=None)`: assemble core-owned sparse DM/H/S entries into compact global orbital numbering.
 - `write_global_matrices_manifest(workdir, natoms=None)`: write `global_matrices.json` with the assembled matrix summary.
+- `build_matrix_shape_report(workdir)`: build per-rank/block local matrix M/N/K diagnostics.
+- `write_matrix_shape_report_manifest(workdir)`: write `matrix_shape_report.json` with per-process local/core matrix shapes.
 - `write_embedded_observables_manifest(workdir)`: write the minimal closed observable manifest.
 - `write_embedding_benchmark_manifest(workdir, reference_observables)`: compare embedded observables with a reference.
 - `write_embedding_benchmark_from_reference_workdir(workdir, reference_workdir)`: compare embedded observables with another run directory.
