@@ -926,6 +926,30 @@ def test_predictive_boundary_corrections_use_returned_dm_hsx_without_reference(t
     assert potential["source"] == "siesta_returned_dm_hsx"
     assert potential["uses_reference_energy"] is False
 
+    block_dir = tmp_path / "block_0000"
+    block_dir.mkdir()
+    (block_dir / "input.fdf").write_text("SystemLabel block_0000\n")
+    (tmp_path / "blocks.json").write_text(
+        json.dumps(
+            [
+                {
+                    "block_id": 0,
+                    "core_atom_start": 0,
+                    "core_atom_end": 1,
+                    "input_atom_start": 0,
+                    "input_atom_end": 2,
+                }
+            ]
+        )
+    )
+
+    siesta_inputs = adapter.write_siesta_embedding_potential_inputs(tmp_path)
+
+    assert siesta_inputs["num_blocks_with_potential"] == 1
+    assert (block_dir / "ewf_embedding_potential.dat").exists()
+    assert "1 1 1 -1.0000000000000000e+00" in (block_dir / "ewf_embedding_potential.dat").read_text()
+    assert "EWF.Embedding.PotentialFile   ewf_embedding_potential.dat" in (block_dir / "input.fdf").read_text()
+
 
 def test_read_run_config_from_environment(tmp_path):
     config = adapter.read_run_config(
@@ -945,6 +969,7 @@ def test_read_run_config_from_environment(tmp_path):
             "EWF_DM_MIXING_WEIGHT": "0.03",
             "EWF_PREDICTIVE_BOUNDARY": "true",
             "EWF_PREDICTIVE_BOUNDARY_DAMPING": "0.25",
+            "EWF_PREDICTIVE_BOUNDARY_RERUN": "true",
         }
     )
 
@@ -961,6 +986,7 @@ def test_read_run_config_from_environment(tmp_path):
     assert config.dry_run is False
     assert config.predictive_boundary is True
     assert config.predictive_boundary_damping == 0.25
+    assert config.predictive_boundary_rerun is True
     assert config.solver.ntpoly_method == 2
     assert config.solver.ntpoly_filter == 1.0e-8
     assert config.solver.ntpoly_tolerance == 1.0e-5

@@ -134,6 +134,7 @@ class SiestaRunConfig:
     dry_run: bool
     predictive_boundary: bool = False
     predictive_boundary_damping: float = 1.0
+    predictive_boundary_rerun: bool = False
     solver: SiestaSolverConfig = dataclasses.field(default_factory=SiestaSolverConfig)
 
 
@@ -499,6 +500,11 @@ class SiestaBlockWorkflow:
         if (self.config.workdir / "validation.json").exists():
             payload["physical_readiness"] = write_physical_readiness_manifest(self.config.workdir)
         return payload
+
+    def write_predictive_embedding_inputs(self) -> dict:
+        """Write SIESTA-readable embedding potentials for a predictive rerun."""
+
+        return write_siesta_embedding_potential_inputs(self.config.workdir)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1182,10 +1188,21 @@ def build_predictive_boundary_potential(
             }
         )
     unparameterized = sum(1 for term in terms if term.get("status") != "parameterized")
-    if terms and not blockers:
+    siesta_applied = _siesta_embedding_potential_applied(workdir)
+    all_converged = bool(results) and all(result.get("converged") is True for result in results)
+    if terms and not blockers and not siesta_applied:
         blockers.append(
             "Predictive boundary potential is computed from SIESTA-returned DM/HSX but is not yet injected back into SIESTA Hamiltonian for a self-consistent rerun"
         )
+    if siesta_applied and not all_converged:
+        blockers.append("SIESTA embedding potential was applied, but not all block reruns converged")
+    self_consistency_status = (
+        "converged"
+        if siesta_applied and all_converged
+        else "external_potential_applied_not_converged"
+        if siesta_applied
+        else "single_shot_not_self_consistent"
+    )
     return {
         "version": 1,
         "potential_level": "predictive-boundary-potential-v1",
@@ -1193,8 +1210,8 @@ def build_predictive_boundary_potential(
         "source": "siesta_returned_dm_hsx",
         "uses_reference_energy": False,
         "damping": float(damping),
-        "self_consistency_status": "single_shot_not_self_consistent",
-        "sIESTA_external_potential_applied": False,
+        "self_consistency_status": self_consistency_status,
+        "sIESTA_external_potential_applied": siesta_applied,
         "num_terms": len(terms),
         "num_parameterized_terms": len(terms) - unparameterized,
         "num_unparameterized_terms": unparameterized,
@@ -1262,6 +1279,77 @@ def write_predictive_boundary_corrections_manifest(
         "corrections": corrections,
     }
     (workdir / "boundary_corrections.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
+def write_siesta_embedding_potential_inputs(workdir: str | os.PathLike[str]) -> dict:
+    """Write block-local SIESTA embedding potential files and FDF hooks."""
+
+    workdir = Path(workdir)
+    potential = _read_optional_json(workdir / "predictive_embedding_potential.json")
+    if potential is None:
+        potential = write_predictive_boundary_potential_manifest(workdir)
+    results = _read_json_list(workdir / "results.json") if (workdir / "results.json").exists() else collect_rank_results(workdir)
+    results_by_block = {int(result["block_id"]): result for result in results}
+    blocks = _read_json_list(workdir / "blocks.json")
+    written_blocks = []
+    skipped_terms = []
+    for block in blocks:
+        block_id = int(block["block_id"])
+        block_dir = workdir / f"block_{block_id:04d}"
+        result = results_by_block.get(block_id)
+        if result is None:
+            continue
+        atom_ranges = {
+            int(atom): (int(bounds[0]), int(bounds[1]))
+            for atom, bounds in result.get("atom_orbital_ranges", {}).items()
+        }
+        entries: dict[tuple[int, int, int], float] = {}
+        for term in potential.get("terms", []):
+            if int(term.get("block_id", -1)) != block_id or term.get("status") != "parameterized":
+                continue
+            core_atom = int(term["core_atom"])
+            if core_atom not in atom_ranges:
+                skipped_terms.append({"block_id": block_id, "core_atom": core_atom, "reason": "missing_orbital_range"})
+                continue
+            value = float(term["hamiltonian_embedding_potential"]["value_ev"])
+            start, end = atom_ranges[core_atom]
+            nspin = max(1, _nspin_hamiltonian_from_result(result))
+            for orbital in range(start + 1, end + 1):
+                for spin in range(1, nspin + 1):
+                    key = (orbital, orbital, spin)
+                    entries[key] = entries.get(key, 0.0) + value
+        if not entries:
+            continue
+        potential_path = block_dir / "ewf_embedding_potential.dat"
+        lines = [
+            "# row col spin value_eV",
+            "# generated from predictive_embedding_potential.json",
+        ]
+        for (row, col, spin), value in sorted(entries.items()):
+            lines.append(f"{row:d} {col:d} {spin:d} {value:.16e}")
+        potential_path.write_text("\n".join(lines) + "\n")
+        _ensure_fdf_option(block_dir / "input.fdf", "EWF.Embedding.PotentialFile", potential_path.name)
+        written_blocks.append(
+            {
+                "block_id": block_id,
+                "potential_file": str(potential_path),
+                "num_entries": len(entries),
+                "sum_value_ev": float(sum(entries.values())),
+            }
+        )
+    payload = {
+        "version": 1,
+        "model": "diagonal-core-orbital-boundary-shift-v1",
+        "source": "predictive_embedding_potential.json",
+        "sIESTA_fdf_key": "EWF.Embedding.PotentialFile",
+        "num_blocks_with_potential": len(written_blocks),
+        "blocks": written_blocks,
+        "skipped_terms": skipped_terms,
+    }
+    (workdir / "siesta_embedding_potential_inputs.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    )
     return payload
 
 
@@ -1507,6 +1595,7 @@ def read_run_config(environ: dict[str, str] | None = None) -> SiestaRunConfig:
         dry_run=_get_bool(environ, "EWF_SIESTA_DRY_RUN", True),
         predictive_boundary=_get_bool(environ, "EWF_PREDICTIVE_BOUNDARY", False),
         predictive_boundary_damping=_get_positive_float(environ, "EWF_PREDICTIVE_BOUNDARY_DAMPING", 1.0),
+        predictive_boundary_rerun=_get_bool(environ, "EWF_PREDICTIVE_BOUNDARY_RERUN", False),
         solver=solver,
     )
 
@@ -2916,6 +3005,48 @@ def _read_local_matrix_nnz(result: dict) -> int | None:
         except Exception:
             continue
     return None
+
+
+def _nspin_hamiltonian_from_result(result: dict) -> int:
+    metadata = result.get("matrix_metadata", {}).get("hamiltonian_overlap", {})
+    value = metadata.get("nspin")
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _ensure_fdf_option(path: Path, key: str, value: str) -> None:
+    lines = path.read_text().splitlines()
+    option = f"{key}   {value}"
+    key_lower = key.lower()
+    replaced = False
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if _option_key(stripped.lower()) == key_lower:
+            lines[index] = option
+            replaced = True
+            break
+    if not replaced:
+        lines.extend(["", "# EWF predictive embedding potential.", option])
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _siesta_embedding_potential_applied(workdir: Path) -> bool:
+    blocks = _read_optional_json(workdir / "blocks.json") or []
+    if not blocks:
+        return False
+    applied = []
+    for block in blocks:
+        output = workdir / f"block_{int(block['block_id']):04d}" / "siesta.out"
+        if not output.exists():
+            applied.append(False)
+            continue
+        text = output.read_text(errors="replace")
+        applied.append("ewf_embedding_potential: applied" in text)
+    return bool(applied) and all(applied)
 
 
 def _compute_boundary_coupling_from_result(result: dict, core_atom: int, environment_atom: int) -> dict:
