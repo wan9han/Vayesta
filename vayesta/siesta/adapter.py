@@ -1108,9 +1108,14 @@ def calibrate_boundary_corrections_to_reference(
         raise FileNotFoundError(observables_path)
     corrections = json.loads(corrections_path.read_text())
     observables = json.loads(observables_path.read_text())
-    current_energy = observables.get("embedded_total_energy_ev")
+    validation = _read_optional_json(workdir / "validation.json") or {}
+    current_energy = validation.get("total_block_energy_ev", observables.get("total_block_energy_ev"))
+    baseline_source = "validation.total_block_energy_ev" if current_energy is not None else None
     if current_energy is None:
-        raise ValueError("embedded_observables.json has no embedded_total_energy_ev")
+        current_energy = observables.get("embedded_total_energy_ev")
+        baseline_source = "embedded_observables.embedded_total_energy_ev"
+    if current_energy is None:
+        raise ValueError("No total block or embedded energy is available for calibration")
     correction_slots = corrections.get("corrections", [])
     if not correction_slots:
         raise ValueError("No boundary correction slots are available for calibration")
@@ -1121,6 +1126,8 @@ def calibrate_boundary_corrections_to_reference(
         correction["calibration"] = {
             "model": "reference_total_energy_match",
             "reference_total_energy_ev": float(reference_total_energy_ev),
+            "baseline_total_energy_ev": float(current_energy),
+            "baseline_source": baseline_source,
         }
         correction["status"] = "parameterized"
     corrections["correction_level"] = "reference-calibrated-boundary-closure"
@@ -1128,6 +1135,8 @@ def calibrate_boundary_corrections_to_reference(
     corrections["num_parameterized_corrections"] = len(correction_slots)
     corrections["num_unparameterized_corrections"] = 0
     corrections["reference_total_energy_ev"] = float(reference_total_energy_ev)
+    corrections["calibration_baseline_total_energy_ev"] = float(current_energy)
+    corrections["calibration_baseline_source"] = baseline_source
     corrections["total_calibrated_energy_correction_ev"] = float(delta)
     corrections_path.write_text(json.dumps(corrections, indent=2, sort_keys=True) + "\n")
     return corrections

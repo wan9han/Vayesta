@@ -875,6 +875,29 @@ def test_calibrate_boundary_corrections_to_reference_energy(tmp_path):
     assert payload["corrections"][0]["calibration"]["reference_total_energy_ev"] == -10.0
 
 
+def test_calibrate_boundary_corrections_prefers_block_energy_baseline(tmp_path):
+    (tmp_path / "boundary_corrections.json").write_text(
+        json.dumps(
+            {
+                "correction_level": "minimal-boundary-closure",
+                "corrections": [
+                    {"energy_correction_ev": 100.0, "status": "parameterized"},
+                    {"energy_correction_ev": 100.0, "status": "parameterized"},
+                ],
+            }
+        )
+    )
+    (tmp_path / "validation.json").write_text(json.dumps({"total_block_energy_ev": -12.0}))
+    (tmp_path / "embedded_observables.json").write_text(json.dumps({"embedded_total_energy_ev": 188.0}))
+
+    payload = adapter.calibrate_boundary_corrections_to_reference(tmp_path, -10.0)
+
+    assert payload["total_calibrated_energy_correction_ev"] == 2.0
+    assert [item["energy_correction_ev"] for item in payload["corrections"]] == [1.0, 1.0]
+    assert payload["calibration_baseline_source"] == "validation.total_block_energy_ev"
+    assert payload["corrections"][0]["calibration"]["baseline_total_energy_ev"] == -12.0
+
+
 def test_predictive_boundary_corrections_use_returned_dm_hsx_without_reference(tmp_path):
     dm_path = tmp_path / "block_0000.DM"
     hsx_path = tmp_path / "block_0000.HSX"
