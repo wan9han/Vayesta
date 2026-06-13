@@ -1106,6 +1106,154 @@ def calibrate_boundary_corrections_to_reference(
     return corrections
 
 
+def build_predictive_boundary_potential(
+    workdir: str | os.PathLike[str],
+    damping: float = 1.0,
+) -> dict:
+    """Build a non-reference boundary potential from SIESTA DM/HSX couplings."""
+
+    workdir = Path(workdir)
+    contract = _read_optional_json(workdir / "embedding_contract.json") or {}
+    results = _read_json_list(workdir / "results.json") if (workdir / "results.json").exists() else collect_rank_results(workdir)
+    results_by_block = {int(result["block_id"]): result for result in results}
+    terms = []
+    total_energy_correction = 0.0
+    blockers = []
+    for term in contract.get("terms", []):
+        if term.get("status") != "pending_embedding_correction":
+            continue
+        block_id = int(term["block_id"])
+        result = results_by_block.get(block_id)
+        if result is None:
+            blockers.append(f"Block {block_id} has no SIESTA result for predictive boundary potential")
+            terms.append(_predictive_boundary_error_term(term, "missing_result"))
+            continue
+        try:
+            coupling = _compute_boundary_coupling_from_result(
+                result,
+                int(term["core_atom"]),
+                int(term["environment_atom"]),
+            )
+        except Exception as exc:
+            blockers.append(f"Block {block_id} boundary {term['bond_atoms']} could not be evaluated: {exc}")
+            terms.append(_predictive_boundary_error_term(term, str(exc)))
+            continue
+        energy_correction = float(-0.5 * damping * coupling["density_hamiltonian_coupling_ev"])
+        potential_value = float(
+            -damping
+            * coupling["density_hamiltonian_coupling_ev"]
+            / max(1, int(coupling["num_core_orbitals"]))
+        )
+        total_energy_correction += energy_correction
+        terms.append(
+            {
+                "block_id": block_id,
+                "bond_atoms": list(term["bond_atoms"]),
+                "core_atom": int(term["core_atom"]),
+                "environment_atom": int(term["environment_atom"]),
+                "status": "parameterized",
+                "model": "density_hamiltonian_boundary_coupling_v1",
+                "source": "siesta_returned_dm_hsx",
+                "damping": float(damping),
+                "num_core_orbitals": coupling["num_core_orbitals"],
+                "num_environment_orbitals": coupling["num_environment_orbitals"],
+                "num_coupling_entries": coupling["num_coupling_entries"],
+                "density_hamiltonian_coupling_ev": coupling["density_hamiltonian_coupling_ev"],
+                "density_overlap_population": coupling["density_overlap_population"],
+                "hamiltonian_embedding_potential": {
+                    "model": "average_core_boundary_shift_from_density_hamiltonian_coupling",
+                    "value_ev": potential_value,
+                    "scope": "core_boundary_orbitals",
+                    "applied_to_siesta_input": False,
+                },
+                "energy_correction_ev": energy_correction,
+                "electron_count_correction": 0.0,
+            }
+        )
+    unparameterized = sum(1 for term in terms if term.get("status") != "parameterized")
+    if terms and not blockers:
+        blockers.append(
+            "Predictive boundary potential is computed from SIESTA-returned DM/HSX but is not yet injected back into SIESTA Hamiltonian for a self-consistent rerun"
+        )
+    return {
+        "version": 1,
+        "potential_level": "predictive-boundary-potential-v1",
+        "model": "density_hamiltonian_boundary_coupling_v1",
+        "source": "siesta_returned_dm_hsx",
+        "uses_reference_energy": False,
+        "damping": float(damping),
+        "self_consistency_status": "single_shot_not_self_consistent",
+        "sIESTA_external_potential_applied": False,
+        "num_terms": len(terms),
+        "num_parameterized_terms": len(terms) - unparameterized,
+        "num_unparameterized_terms": unparameterized,
+        "total_predictive_energy_correction_ev": float(total_energy_correction),
+        "blockers": blockers,
+        "terms": terms,
+    }
+
+
+def write_predictive_boundary_potential_manifest(
+    workdir: str | os.PathLike[str],
+    damping: float = 1.0,
+) -> dict:
+    """Write `predictive_embedding_potential.json` from returned SIESTA matrices."""
+
+    workdir = Path(workdir)
+    payload = build_predictive_boundary_potential(workdir, damping=damping)
+    (workdir / "predictive_embedding_potential.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    )
+    return payload
+
+
+def write_predictive_boundary_corrections_manifest(
+    workdir: str | os.PathLike[str],
+    damping: float = 1.0,
+) -> dict:
+    """Write predictive non-reference boundary corrections from SIESTA DM/HSX."""
+
+    workdir = Path(workdir)
+    potential = write_predictive_boundary_potential_manifest(workdir, damping=damping)
+    corrections = []
+    for term in potential.get("terms", []):
+        if term.get("status") != "parameterized":
+            continue
+        corrections.append(
+            {
+                "block_id": term["block_id"],
+                "bond_atoms": term["bond_atoms"],
+                "core_atom": term["core_atom"],
+                "environment_atom": term["environment_atom"],
+                "correction_type": "predictive_boundary_bond_embedding",
+                "hamiltonian_embedding_potential": term["hamiltonian_embedding_potential"],
+                "energy_correction_ev": term["energy_correction_ev"],
+                "electron_count_correction": term["electron_count_correction"],
+                "status": "parameterized",
+                "model": term["model"],
+                "source": term["source"],
+                "density_hamiltonian_coupling_ev": term["density_hamiltonian_coupling_ev"],
+                "density_overlap_population": term["density_overlap_population"],
+            }
+        )
+    payload = {
+        "version": 1,
+        "correction_level": "predictive-boundary-coupling-v1",
+        "closure_model": "density-hamiltonian-boundary-coupling-v1",
+        "uses_reference_energy": False,
+        "self_consistency_status": potential.get("self_consistency_status"),
+        "sIESTA_external_potential_applied": potential.get("sIESTA_external_potential_applied"),
+        "num_corrections": len(corrections),
+        "num_parameterized_corrections": len(corrections),
+        "num_unparameterized_corrections": int(potential.get("num_unparameterized_terms", 0)),
+        "total_predictive_energy_correction_ev": potential.get("total_predictive_energy_correction_ev"),
+        "blockers": list(potential.get("blockers", [])),
+        "corrections": corrections,
+    }
+    (workdir / "boundary_corrections.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
 def assign_blocks_to_machine(blocks: Sequence[SiestaBlock], machine_id: int) -> list[SiestaBlock]:
     """Return blocks assigned to a simulated machine."""
 
@@ -2069,6 +2217,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     global_matrices = _read_optional_json(workdir / "global_matrices.json") or {}
     observables = _read_optional_json(workdir / "embedded_observables.json") or {}
     benchmark = _read_optional_json(workdir / "embedding_benchmark.json") or {}
+    predictive = _read_optional_json(workdir / "predictive_embedding_potential.json") or {}
 
     backend_ready = bool(validation.get("ok"))
     blockers = []
@@ -2100,16 +2249,27 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     reference_calibrated_ready = corrections.get("correction_level") == "reference-calibrated-boundary-closure"
     benchmark_manifest_ready = bool(benchmark)
     reference_benchmark_ready = _benchmark_is_external_reference_ready(benchmark)
+    predictive_potential_ready = predictive.get("num_parameterized_terms", 0) > 0 and not predictive.get("uses_reference_energy", True)
+    predictive_embedding_ready = bool(
+        predictive_potential_ready
+        and predictive.get("self_consistency_status") == "converged"
+        and predictive.get("sIESTA_external_potential_applied") is True
+    )
     return {
         "version": 1,
         "backend_artifacts_ready": backend_ready,
         "minimal_embedded_closure_ready": minimal_closure_ready,
         "embedded_observable_ready": embedded_ready,
         "reference_calibrated_correction_ready": reference_calibrated_ready,
+        "predictive_boundary_potential_ready": predictive_potential_ready,
         "benchmark_manifest_ready": benchmark_manifest_ready,
         "reference_benchmark_ready": reference_benchmark_ready,
-        "predictive_embedding_ready": False,
-        "predictive_embedding_status": "not_implemented_minimal_or_reference_calibrated_closure_only",
+        "predictive_embedding_ready": predictive_embedding_ready,
+        "predictive_embedding_status": (
+            "self_consistent_predictive_embedding_ready"
+            if predictive_embedding_ready
+            else predictive.get("self_consistency_status", "not_implemented_minimal_or_reference_calibrated_closure_only")
+        ),
         "status": "embedded_observable_ready" if embedded_ready else "diagnostic_backend_only",
         "blockers": blockers,
         "diagnostic_outputs": {
@@ -2122,6 +2282,12 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "boundary_closure_model": corrections.get("closure_model"),
             "boundary_reference_total_energy_ev": corrections.get("reference_total_energy_ev"),
             "boundary_total_calibrated_energy_correction_ev": corrections.get("total_calibrated_energy_correction_ev"),
+            "predictive_potential_level": predictive.get("potential_level"),
+            "predictive_potential_model": predictive.get("model"),
+            "predictive_potential_uses_reference_energy": predictive.get("uses_reference_energy"),
+            "predictive_total_energy_correction_ev": predictive.get("total_predictive_energy_correction_ev"),
+            "predictive_siesta_external_potential_applied": predictive.get("sIESTA_external_potential_applied"),
+            "predictive_blockers": predictive.get("blockers"),
             "embedded_total_energy_ev": observables.get("embedded_total_energy_ev"),
             "benchmark_ok": benchmark.get("ok"),
             "benchmark_status": benchmark.get("status"),
@@ -2737,6 +2903,75 @@ def _read_local_matrix_nnz(result: dict) -> int | None:
         except Exception:
             continue
     return None
+
+
+def _compute_boundary_coupling_from_result(result: dict, core_atom: int, environment_atom: int) -> dict:
+    ranges = {
+        int(atom): (int(bounds[0]), int(bounds[1]))
+        for atom, bounds in result.get("atom_orbital_ranges", {}).items()
+    }
+    if core_atom not in ranges:
+        raise ValueError(f"missing core atom orbital range {core_atom}")
+    if environment_atom not in ranges:
+        raise ValueError(f"missing environment atom orbital range {environment_atom}")
+    hsx_path = _str_to_path(result.get("hamiltonian_matrix_path"))
+    dm_path = _str_to_path(result.get("density_matrix_path"))
+    if hsx_path is None or not hsx_path.exists():
+        raise ValueError("missing HSX matrix")
+    if dm_path is None or not dm_path.exists():
+        raise ValueError("missing density matrix")
+    hsx = read_hsx_sparse(hsx_path)
+    dm = read_density_matrix_sparse(dm_path)
+    core_range = ranges[core_atom]
+    env_range = ranges[environment_atom]
+    core_mask_h = (hsx.rows >= core_range[0]) & (hsx.rows < core_range[1])
+    core_mask_h |= (hsx.cols >= core_range[0]) & (hsx.cols < core_range[1])
+    env_mask_h = (hsx.rows >= env_range[0]) & (hsx.rows < env_range[1])
+    env_mask_h |= (hsx.cols >= env_range[0]) & (hsx.cols < env_range[1])
+    crossing = core_mask_h & env_mask_h
+    if not np.any(crossing):
+        return {
+            "num_core_orbitals": core_range[1] - core_range[0],
+            "num_environment_orbitals": env_range[1] - env_range[0],
+            "num_coupling_entries": 0,
+            "density_hamiltonian_coupling_ev": 0.0,
+            "density_overlap_population": 0.0,
+        }
+    dm_lookup = {
+        (int(row), int(col)): index
+        for index, (row, col) in enumerate(zip(dm.rows.tolist(), dm.cols.tolist()))
+    }
+    coupling = 0.0
+    overlap_population = 0.0
+    num_entries = 0
+    for hsx_index in np.nonzero(crossing)[0]:
+        key = (int(hsx.rows[hsx_index]), int(hsx.cols[hsx_index]))
+        dm_index = dm_lookup.get(key)
+        if dm_index is None:
+            continue
+        nspin = min(dm.density.shape[0], hsx.hamiltonian.shape[0])
+        if nspin:
+            coupling += float(np.dot(dm.density[:nspin, dm_index], hsx.hamiltonian[:nspin, hsx_index]))
+            overlap_population += float(np.sum(dm.density[:nspin, dm_index]) * hsx.overlap[hsx_index])
+            num_entries += 1
+    return {
+        "num_core_orbitals": core_range[1] - core_range[0],
+        "num_environment_orbitals": env_range[1] - env_range[0],
+        "num_coupling_entries": num_entries,
+        "density_hamiltonian_coupling_ev": float(coupling),
+        "density_overlap_population": float(overlap_population),
+    }
+
+
+def _predictive_boundary_error_term(term: dict, reason: str) -> dict:
+    return {
+        "block_id": int(term["block_id"]),
+        "bond_atoms": list(term.get("bond_atoms", [])),
+        "core_atom": term.get("core_atom"),
+        "environment_atom": term.get("environment_atom"),
+        "status": "not_parameterized",
+        "error": reason,
+    }
 
 
 def _square_mnk(norbitals: int | None, nnz: int | None = None) -> dict:

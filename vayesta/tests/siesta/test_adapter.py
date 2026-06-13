@@ -677,6 +677,45 @@ def test_physical_readiness_report_allows_completed_embedding_contract(tmp_path)
     assert payload["diagnostic_outputs"]["boundary_reference_total_energy_ev"] == -1.2
 
 
+def test_physical_readiness_reports_predictive_boundary_potential_not_self_consistent(tmp_path):
+    (tmp_path / "validation.json").write_text(json.dumps({"ok": True}))
+    (tmp_path / "embedding_contract.json").write_text(json.dumps({"num_pending_embedding_terms": 1}))
+    (tmp_path / "boundary_corrections.json").write_text(
+        json.dumps(
+            {
+                "correction_level": "predictive-boundary-coupling-v1",
+                "num_parameterized_corrections": 1,
+                "num_unparameterized_corrections": 0,
+            }
+        )
+    )
+    (tmp_path / "electron_constraint.json").write_text(json.dumps({"chemical_potential_status": "applied"}))
+    (tmp_path / "embedded_observables.json").write_text(json.dumps({"embedded_total_energy_ev": -1.5}))
+    (tmp_path / "predictive_embedding_potential.json").write_text(
+        json.dumps(
+            {
+                "potential_level": "predictive-boundary-potential-v1",
+                "model": "density_hamiltonian_boundary_coupling_v1",
+                "uses_reference_energy": False,
+                "num_parameterized_terms": 1,
+                "total_predictive_energy_correction_ev": -0.5,
+                "self_consistency_status": "single_shot_not_self_consistent",
+                "sIESTA_external_potential_applied": False,
+                "blockers": ["not injected"],
+            }
+        )
+    )
+
+    payload = adapter.build_physical_readiness_report(tmp_path)
+
+    assert payload["predictive_boundary_potential_ready"] is True
+    assert payload["predictive_embedding_ready"] is False
+    assert payload["predictive_embedding_status"] == "single_shot_not_self_consistent"
+    assert payload["diagnostic_outputs"]["predictive_potential_uses_reference_energy"] is False
+    assert payload["diagnostic_outputs"]["predictive_total_energy_correction_ev"] == -0.5
+    assert payload["diagnostic_outputs"]["predictive_siesta_external_potential_applied"] is False
+
+
 def test_embedded_observables_manifest_combines_energy_and_electron_closure(tmp_path):
     (tmp_path / "validation.json").write_text(
         json.dumps({"total_block_energy_ev": -10.0})
@@ -834,6 +873,58 @@ def test_calibrate_boundary_corrections_to_reference_energy(tmp_path):
     assert payload["total_calibrated_energy_correction_ev"] == 2.0
     assert [item["energy_correction_ev"] for item in payload["corrections"]] == [1.0, 1.0]
     assert payload["corrections"][0]["calibration"]["reference_total_energy_ev"] == -10.0
+
+
+def test_predictive_boundary_corrections_use_returned_dm_hsx_without_reference(tmp_path):
+    dm_path = tmp_path / "block_0000.DM"
+    hsx_path = tmp_path / "block_0000.HSX"
+    _write_full_dm(dm_path, [2, 1], [[1, 2], [2]], [[[1.0, 0.2], [1.0]]])
+    _write_full_hsx(hsx_path, [2, 1], [[1, 2], [2]], [[[0.0, 5.0], [0.0]]], [[1.0, 0.1], [1.0]])
+    (tmp_path / "embedding_contract.json").write_text(
+        json.dumps(
+            {
+                "terms": [
+                    {
+                        "block_id": 0,
+                        "bond_atoms": [0, 1],
+                        "core_atom": 0,
+                        "environment_atom": 1,
+                        "status": "pending_embedding_correction",
+                    }
+                ]
+            }
+        )
+    )
+    (tmp_path / "results.json").write_text(
+        json.dumps(
+            [
+                {
+                    "block_id": 0,
+                    "rank": 0,
+                    "returncode": 0,
+                    "converged": True,
+                    "density_matrix_path": str(dm_path),
+                    "hamiltonian_matrix_path": str(hsx_path),
+                    "atom_orbital_ranges": {"0": [0, 1], "1": [1, 2]},
+                    "matrix_metadata": {"elsi": {"solver_used": ["NTPOLY"], "last_solver_settings": {"nt_method": 2}}},
+                }
+            ]
+        )
+    )
+
+    payload = adapter.write_predictive_boundary_corrections_manifest(tmp_path, damping=1.0)
+    potential = json.loads((tmp_path / "predictive_embedding_potential.json").read_text())
+
+    assert payload["correction_level"] == "predictive-boundary-coupling-v1"
+    assert payload["uses_reference_energy"] is False
+    assert payload["num_parameterized_corrections"] == 1
+    assert payload["total_predictive_energy_correction_ev"] == -0.5
+    assert payload["corrections"][0]["density_hamiltonian_coupling_ev"] == 1.0
+    assert payload["corrections"][0]["energy_correction_ev"] == -0.5
+    assert payload["corrections"][0]["hamiltonian_embedding_potential"]["value_ev"] == -1.0
+    assert payload["sIESTA_external_potential_applied"] is False
+    assert potential["source"] == "siesta_returned_dm_hsx"
+    assert potential["uses_reference_energy"] is False
 
 
 def test_read_run_config_from_environment(tmp_path):

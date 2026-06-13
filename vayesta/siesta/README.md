@@ -277,6 +277,9 @@ The public collection helpers are:
 - `write_embedding_benchmark_manifest(workdir, reference_observables)`: compare embedded observables with a reference.
 - `write_embedding_benchmark_from_reference_workdir(workdir, reference_workdir)`: compare embedded observables with another run directory.
 - `calibrate_boundary_corrections_to_reference(workdir, reference_total_energy_ev)`: fit boundary energy corrections to a reference total energy.
+- `build_predictive_boundary_potential(workdir)`: derive non-reference boundary potentials from returned SIESTA DM/HSX coupling terms.
+- `write_predictive_boundary_potential_manifest(workdir)`: write `predictive_embedding_potential.json`.
+- `write_predictive_boundary_corrections_manifest(workdir)`: replace `boundary_corrections.json` with predictive boundary-coupling corrections.
 - `summarize_run(workdir)`: build rank/block success, timing, and matrix-size metrics.
 - `write_run_summary_manifest(workdir)`: write those metrics to `run_summary.json`.
 - `compare_weak_scaling_runs(workdirs)`: compare multiple `run_summary.json` files.
