@@ -254,6 +254,10 @@ block artifacts:
 - `cluster_solver_results.json` consumes those NPZ files with a one-electron
   Lowdin reference solver.  This verifies the solver interface but is not a
   correlated EWF solver.
+- `effective_correlated_results.json` applies a configurable Hubbard-like
+  effective interaction to the cluster eigenbasis.  It produces a model
+  correlation correction while explicitly recording that no ab-initio
+  two-electron integrals are used.
 
 When these files are present and validation passes, `physical_readiness.json`
 reports `embedded_observable_ready`.  This is a minimal embedding closure, not a
@@ -292,6 +296,7 @@ The public collection helpers are:
 - `write_predictive_ewf_closure_manifest(workdir)`: write bath-rank and mean-field double-counting diagnostics from returned SIESTA matrices.
 - `write_cluster_hamiltonians_manifest(workdir)`: write per-block cluster Hamiltonian NPZ files and `cluster_hamiltonians.json`.
 - `write_cluster_solver_results_manifest(workdir)`: solve the cluster Hamiltonian NPZ files with the one-electron reference solver.
+- `write_effective_correlated_results_manifest(workdir)`: compute the model effective-interaction correlation correction.
 - `summarize_run(workdir)`: build rank/block success, timing, and matrix-size metrics.
 - `write_run_summary_manifest(workdir)`: write those metrics to `run_summary.json`.
 - `compare_weak_scaling_runs(workdirs)`: compare multiple `run_summary.json` files.
