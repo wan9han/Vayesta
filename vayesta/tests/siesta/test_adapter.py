@@ -847,6 +847,8 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
                 "source_ao_integrals_npz_path": "/tmp/ao_eri.npz",
                 "source_energy_unit": "hartree",
                 "output_energy_unit": "ev",
+                "ao_ordering_status": "verified",
+                "ao_ordering_verified": True,
                 "ready": True,
                 "num_written_blocks": 1,
                 "uses_ab_initio_two_electron_integrals": True,
@@ -917,6 +919,8 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
     assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_source_path"] == "/tmp/ao_eri.npz"
     assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_source_energy_unit"] == "hartree"
     assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_output_energy_unit"] == "ev"
+    assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_ao_ordering_status"] == "verified"
+    assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_ao_ordering_verified"] is True
     assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_ao_ordering_scope"] == [
         "block_local_siesta_orbital_order"
     ]
@@ -1619,6 +1623,9 @@ def test_cluster_two_electron_integral_transform_feeds_effective_solver(tmp_path
     assert tensors["uses_ab_initio_two_electron_integrals"] is True
     assert tensors["source_energy_unit"] == "hartree"
     assert tensors["output_energy_unit"] == "ev"
+    assert tensors["ao_ordering_status"] == "unverified_external_ordering"
+    assert tensors["ao_ordering_verified"] is False
+    assert tensors["blocks"][0]["ao_ordering_verified"] is False
     assert tensors["blocks"][0]["ovov_shape"] == [1, 2, 2]
     assert updated_clusters["blocks"][0]["two_electron_integrals_npz_path"] == tensors["blocks"][0]["npz_path"]
     assert payload["uses_ab_initio_two_electron_integrals"] is True
@@ -1668,8 +1675,92 @@ def test_cluster_two_electron_integral_transform_supports_per_block_ao_eri(tmp_p
     assert [block["ovov_shape"] for block in tensors["blocks"]] == [[1, 2, 2], [1, 3, 3]]
     assert all(block["ao_ordering_scope"] == "block_local_siesta_orbital_order" for block in tensors["blocks"])
     assert all(len(block["ao_ordering_fingerprint"]) == 64 for block in tensors["blocks"])
+    assert tensors["ao_ordering_status"] == "unverified_external_ordering"
     assert np.load(tensors["blocks"][0]["npz_path"])["ovov"][0, 0, 1] == pytest.approx(0.2)
     assert np.load(tensors["blocks"][1]["npz_path"])["ovov"][0, 0, 2] == pytest.approx(0.6)
+
+
+def test_cluster_two_electron_integral_transform_verifies_source_fingerprint(tmp_path):
+    block_dir = tmp_path / "block_0000"
+    block_dir.mkdir()
+    npz_path = block_dir / "cluster_hamiltonian_block_0000.npz"
+    np.savez_compressed(
+        npz_path,
+        basis_coefficients=np.eye(2),
+        lowdin_orthogonalizer=np.eye(2),
+        hamiltonian_orthogonalized=np.asarray([[[1.0, 0.0], [0.0, 2.0]]]),
+        density_orthogonalized=np.asarray([[[2.0, 0.0], [0.0, 0.0]]]),
+        overlap_orthogonalized=np.eye(2),
+    )
+    block = {
+        "block_id": 0,
+        "npz_path": str(npz_path),
+        "cluster_basis_size": 2,
+        "orthogonalized_basis_size": 2,
+        "source_norbitals": 2,
+        "core_local_atoms": [0],
+        "environment_local_atoms": [1],
+    }
+    expected = adapter._block_ao_ordering_fingerprint(block, 2)
+    ao_eri = np.zeros((2, 2, 2, 2))
+    ao_eri[0, 1, 0, 1] = 0.3
+    ao_eri_path = tmp_path / "verified_ao_eri.npz"
+    np.savez_compressed(
+        ao_eri_path,
+        ao_eri_block_0000=ao_eri,
+        ao_ordering_fingerprint_block_0000=np.asarray(expected),
+    )
+    (tmp_path / "cluster_hamiltonians.json").write_text(
+        json.dumps({"num_blocks": 1, "ready": True, "blocks": [block]})
+    )
+
+    tensors = adapter.write_cluster_two_electron_integrals_from_ao_manifest(tmp_path, ao_eri_path)
+
+    assert tensors["ready"] is True
+    assert tensors["ao_ordering_status"] == "verified"
+    assert tensors["ao_ordering_verified"] is True
+    assert tensors["blocks"][0]["ao_ordering_verified"] is True
+    assert tensors["blocks"][0]["ao_ordering_expected_fingerprint"] == expected
+    assert np.load(tensors["blocks"][0]["npz_path"])["ao_ordering_verified"].item() is True
+
+
+def test_cluster_two_electron_integral_transform_rejects_fingerprint_mismatch(tmp_path):
+    block_dir = tmp_path / "block_0000"
+    block_dir.mkdir()
+    npz_path = block_dir / "cluster_hamiltonian_block_0000.npz"
+    np.savez_compressed(
+        npz_path,
+        basis_coefficients=np.eye(2),
+        lowdin_orthogonalizer=np.eye(2),
+        hamiltonian_orthogonalized=np.asarray([[[1.0, 0.0], [0.0, 2.0]]]),
+        density_orthogonalized=np.asarray([[[2.0, 0.0], [0.0, 0.0]]]),
+        overlap_orthogonalized=np.eye(2),
+    )
+    block = {
+        "block_id": 0,
+        "npz_path": str(npz_path),
+        "cluster_basis_size": 2,
+        "orthogonalized_basis_size": 2,
+    }
+    ao_eri = np.zeros((2, 2, 2, 2))
+    ao_eri_path = tmp_path / "mismatched_ao_eri.npz"
+    np.savez_compressed(
+        ao_eri_path,
+        ao_eri=ao_eri,
+        ao_ordering_fingerprint_block_0000=np.asarray("bad-fingerprint"),
+    )
+    (tmp_path / "cluster_hamiltonians.json").write_text(
+        json.dumps({"num_blocks": 1, "ready": True, "blocks": [block]})
+    )
+
+    tensors = adapter.write_cluster_two_electron_integrals_from_ao_manifest(tmp_path, ao_eri_path)
+    updated_clusters = json.loads((tmp_path / "cluster_hamiltonians.json").read_text())
+
+    assert tensors["ready"] is False
+    assert tensors["num_written_blocks"] == 0
+    assert tensors["ao_ordering_status"] == "unavailable"
+    assert "fingerprint mismatch" in tensors["blockers"][0]
+    assert "two_electron_integrals_npz_path" not in updated_clusters["blocks"][0]
 
 
 def test_cluster_two_electron_integral_transform_records_input_failure(tmp_path):

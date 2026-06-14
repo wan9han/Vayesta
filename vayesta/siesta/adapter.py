@@ -1656,6 +1656,7 @@ def build_cluster_two_electron_integrals_from_ao(
                 _select_block_ao_eri(ao_data, block_copy, energy_factor),
                 source_path=ao_integrals_npz_path,
                 source_energy_unit=source_energy_unit,
+                source_arrays=ao_data,
             )
             block_copy["two_electron_integrals_npz_path"] = tensor_block["npz_path"]
             blocks.append(tensor_block)
@@ -1667,6 +1668,10 @@ def build_cluster_two_electron_integrals_from_ao(
     updated_clusters["blocks"] = updated_cluster_blocks
     if updated_cluster_blocks:
         (workdir / "cluster_hamiltonians.json").write_text(json.dumps(updated_clusters, indent=2, sort_keys=True) + "\n")
+    verified_flags = [block.get("ao_ordering_verified") for block in blocks]
+    ordering_status = (
+        "verified" if verified_flags and all(flag is True for flag in verified_flags) else "unverified_external_ordering"
+    )
     payload = {
         "version": 1,
         "artifact_level": "external-ao-eri-to-cluster-eigenbasis-ovov-v1",
@@ -1676,6 +1681,8 @@ def build_cluster_two_electron_integrals_from_ao(
         "output_energy_unit": "ev",
         "uses_reference_energy": False,
         "uses_ab_initio_two_electron_integrals": not blockers and bool(blocks),
+        "ao_ordering_status": ordering_status if blocks else "unavailable",
+        "ao_ordering_verified": bool(blocks) and all(flag is True for flag in verified_flags),
         "num_blocks": int(clusters.get("num_blocks", len(updated_cluster_blocks))),
         "num_written_blocks": len(blocks),
         "ready": len(blocks) == int(clusters.get("num_blocks", len(updated_cluster_blocks))) and not blockers,
@@ -1711,6 +1718,8 @@ def _cluster_two_electron_integral_failure_payload(
         "output_energy_unit": "ev",
         "uses_reference_energy": False,
         "uses_ab_initio_two_electron_integrals": False,
+        "ao_ordering_status": "unavailable",
+        "ao_ordering_verified": False,
         "num_blocks": int(clusters.get("num_blocks", len(clusters.get("blocks", [])))),
         "num_written_blocks": 0,
         "ready": False,
@@ -3236,6 +3245,8 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "cluster_two_electron_integrals_source_path": cluster_integrals.get("source_ao_integrals_npz_path"),
             "cluster_two_electron_integrals_source_energy_unit": cluster_integrals.get("source_energy_unit"),
             "cluster_two_electron_integrals_output_energy_unit": cluster_integrals.get("output_energy_unit"),
+            "cluster_two_electron_integrals_ao_ordering_status": cluster_integrals.get("ao_ordering_status"),
+            "cluster_two_electron_integrals_ao_ordering_verified": cluster_integrals.get("ao_ordering_verified"),
             "cluster_two_electron_integrals_num_written_blocks": cluster_integrals.get("num_written_blocks"),
             "cluster_two_electron_integrals_ready": cluster_integrals.get("ready"),
             "cluster_two_electron_integrals_uses_ab_initio": cluster_integrals.get(
@@ -4612,6 +4623,7 @@ def _write_cluster_two_electron_integrals_for_block(
     ao_eri: np.ndarray,
     source_path: Path,
     source_energy_unit: str,
+    source_arrays: object,
 ) -> dict:
     npz_path = Path(block["npz_path"])
     arrays = np.load(npz_path)
@@ -4640,6 +4652,13 @@ def _write_cluster_two_electron_integrals_for_block(
         ovov_by_spin.append(ovov)
     ovov_array = np.asarray(ovov_by_spin)
     ordering_fingerprint = _block_ao_ordering_fingerprint(block, nao)
+    expected_fingerprint = _source_ao_ordering_fingerprint(source_arrays, block_id)
+    ordering_verified = expected_fingerprint == ordering_fingerprint if expected_fingerprint is not None else False
+    if expected_fingerprint is not None and not ordering_verified:
+        raise ValueError(
+            "AO ordering fingerprint mismatch: "
+            f"expected {expected_fingerprint}, computed {ordering_fingerprint}"
+        )
     np.savez_compressed(
         out_path,
         ovov=ovov_array,
@@ -4648,6 +4667,8 @@ def _write_cluster_two_electron_integrals_for_block(
         source_energy_unit=np.asarray(source_energy_unit),
         ao_ordering_scope=np.asarray("block_local_siesta_orbital_order"),
         ao_ordering_fingerprint=np.asarray(ordering_fingerprint),
+        ao_ordering_expected_fingerprint=np.asarray("" if expected_fingerprint is None else expected_fingerprint),
+        ao_ordering_verified=np.asarray(ordering_verified),
         source_ao_integrals_npz_path=np.asarray(str(source_path)),
         cluster_hamiltonian_npz_path=np.asarray(str(npz_path)),
     )
@@ -4660,6 +4681,9 @@ def _write_cluster_two_electron_integrals_for_block(
         "output_energy_unit": "ev",
         "ao_ordering_scope": "block_local_siesta_orbital_order",
         "ao_ordering_fingerprint": ordering_fingerprint,
+        "ao_ordering_expected_fingerprint": expected_fingerprint,
+        "ao_ordering_verified": ordering_verified,
+        "ao_ordering_status": "verified" if ordering_verified else "unverified_external_ordering",
         "format": "cluster-eigenbasis-full-pair-ovov-v1",
         "ao_dimension": nao,
         "nspin": int(ovov_array.shape[0]),
@@ -4695,6 +4719,19 @@ def _block_ao_ordering_fingerprint(block: dict, nao: int) -> str:
     }
     text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _source_ao_ordering_fingerprint(arrays: object, block_id: int) -> str | None:
+    keys = (
+        f"ao_ordering_fingerprint_block_{int(block_id):04d}",
+        f"ao_ordering_fingerprint_block_{int(block_id)}",
+        "ao_ordering_fingerprint",
+    )
+    for key in keys:
+        if key in arrays:
+            value = _npz_optional_scalar_string(arrays, key, "")
+            return value or None
+    return None
 
 
 def _npz_optional_scalar_string(arrays: object, key: str, default: str) -> str:

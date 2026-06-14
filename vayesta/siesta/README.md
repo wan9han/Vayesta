@@ -262,7 +262,10 @@ block artifacts:
   `energy_unit="hartree"` or `"ev"`; output `ovov` couplings are always eV.
   Multi-block inputs can provide `ao_eri_block_XXXX` arrays so each local
   SIESTA block can use its own AO dimension.  Each output block records a
-  block-local SIESTA AO-ordering fingerprint.
+  block-local SIESTA AO-ordering fingerprint.  If the input NPZ provides
+  `ao_ordering_fingerprint_block_XXXX`, it must match the computed fingerprint;
+  otherwise that block is rejected.  Missing fingerprints are allowed but
+  marked `unverified_external_ordering`.
 - `effective_correlated_results.json` applies a second-order cluster
   correlation prototype.  By default it uses a configurable Hubbard-like model
   interaction and explicitly records that no ab-initio two-electron integrals
@@ -333,7 +336,10 @@ Hamiltonian construction.  `EWF_AO_ERI_ENERGY_UNIT` may be `ev` or `hartree`.
 Successful conversion causes the subsequent effective-correlated step to use
 external `ovov` tensors instead of the model U coupling.  For weak-scaling runs
 with different local block sizes, use `ao_eri_block_0000`,
-`ao_eri_block_0001`, ... in the input NPZ.
+`ao_eri_block_0001`, ... in the input NPZ.  Add matching
+`ao_ordering_fingerprint_block_0000`, `ao_ordering_fingerprint_block_0001`, ...
+entries when the ERI producer can prove it used the same block-local SIESTA AO
+order.
 
 `SiestaEwfResult` is the first EWF-facing contract.  It keeps the local SIESTA
 matrix file paths and scalar status, but only assigns ownership to core atoms:
