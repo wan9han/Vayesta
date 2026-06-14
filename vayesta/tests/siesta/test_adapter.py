@@ -369,6 +369,39 @@ def test_load_siesta_results_to_fragments_projects_run_directory(tmp_path):
             }
         )
     )
+    (tmp_path / "effective_correlated_results.json").write_text(
+        json.dumps(
+            {
+                "solver_level": "effective-interaction-second-order-cluster-v1",
+                "solver_kind": "model_correlated_effective_interaction",
+                "ready": True,
+                "correlated_solver_status": "model_effective_interaction_solved",
+                "effective_interaction_u_ev": 1.0,
+                "total_correlation_energy_ev": -0.125,
+                "uses_ab_initio_two_electron_integrals": False,
+            }
+        )
+    )
+    (tmp_path / "effective_correlated_results.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "solver_level": "effective-interaction-second-order-cluster-v1",
+                "solver_kind": "model_correlated_effective_interaction",
+                "ready": True,
+                "correlated_solver_status": "model_effective_interaction_solved",
+                "uses_ab_initio_two_electron_integrals": False,
+                "effective_interaction_u_ev": 1.0,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "solver_status": "solved",
+                        "correlation_energy_ev": -0.125,
+                    }
+                ],
+            }
+        )
+    )
     fragment = type("FakeFragment", (), {"siesta_block_id": 0})()
 
     attached = adapter.load_siesta_results_to_fragments(
@@ -400,6 +433,10 @@ def test_load_siesta_results_to_fragments_projects_run_directory(tmp_path):
     assert fragment.siesta_cluster_solver_status == "solved"
     assert fragment.siesta_cluster_one_electron_energy_ev == -1.25
     assert fragment.siesta_cluster_aufbau_energy_ev == -1.5
+    assert fragment.siesta_effective_correlated_results_ready is True
+    assert fragment.siesta_effective_correlated_solver_status == "solved"
+    assert fragment.siesta_effective_correlation_energy_ev == -0.125
+    assert fragment.siesta_effective_correlated_manifest["uses_ab_initio_two_electron_integrals"] is False
 
 
 def test_generate_block_directories(tmp_path):
@@ -814,12 +851,26 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
             }
         )
     )
+    (tmp_path / "effective_correlated_results.json").write_text(
+        json.dumps(
+            {
+                "solver_level": "effective-interaction-second-order-cluster-v1",
+                "solver_kind": "model_correlated_effective_interaction",
+                "ready": True,
+                "correlated_solver_status": "model_effective_interaction_solved",
+                "effective_interaction_u_ev": 1.0,
+                "total_correlation_energy_ev": -0.125,
+                "uses_ab_initio_two_electron_integrals": False,
+            }
+        )
+    )
 
     payload = adapter.build_physical_readiness_report(tmp_path)
 
     assert payload["predictive_boundary_potential_ready"] is True
     assert payload["cluster_hamiltonians_ready"] is True
     assert payload["cluster_solver_results_ready"] is True
+    assert payload["effective_correlated_results_ready"] is True
     assert payload["predictive_embedding_ready"] is False
     assert payload["predictive_embedding_status"] == "single_shot_not_self_consistent"
     assert payload["diagnostic_outputs"]["predictive_potential_uses_reference_energy"] is False
@@ -830,6 +881,9 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
     assert payload["diagnostic_outputs"]["cluster_solver_ready"] is True
     assert payload["diagnostic_outputs"]["cluster_solver_num_solved_blocks"] == 1
     assert payload["diagnostic_outputs"]["cluster_solver_total_density_projected_one_electron_energy_ev"] == -2.0
+    assert payload["diagnostic_outputs"]["effective_correlated_ready"] is True
+    assert payload["diagnostic_outputs"]["effective_correlation_energy_ev"] == -0.125
+    assert payload["diagnostic_outputs"]["effective_uses_ab_initio_two_electron_integrals"] is False
 
 
 def test_embedded_observables_manifest_combines_energy_and_electron_closure(tmp_path):
@@ -871,6 +925,18 @@ def test_embedded_observables_manifest_combines_energy_and_electron_closure(tmp_
             }
         )
     )
+    (tmp_path / "effective_correlated_results.json").write_text(
+        json.dumps(
+            {
+                "solver_level": "effective-interaction-second-order-cluster-v1",
+                "solver_kind": "model_correlated_effective_interaction",
+                "ready": True,
+                "total_correlation_energy_ev": -0.125,
+                "correlated_solver_status": "model_effective_interaction_solved",
+                "effective_interaction_u_ev": 1.0,
+            }
+        )
+    )
 
     payload = adapter.write_embedded_observables_manifest(tmp_path)
 
@@ -881,6 +947,9 @@ def test_embedded_observables_manifest_combines_energy_and_electron_closure(tmp_
     assert payload["cluster_solver_ready"] is True
     assert payload["cluster_solver_total_density_projected_one_electron_energy_ev"] == -2.0
     assert payload["cluster_solver_correlated_status"] == "not_run_one_electron_reference_only"
+    assert payload["effective_correlated_results_ready"] is True
+    assert payload["effective_correlation_energy_ev"] == -0.125
+    assert payload["effective_embedded_total_energy_ev"] == -10.375
     assert json.loads((tmp_path / "embedded_observables.json").read_text()) == payload
 
 
@@ -1348,6 +1417,56 @@ def test_cluster_solver_consumes_cluster_npz(tmp_path):
     assert json.loads((tmp_path / "cluster_solver_results.json").read_text()) == payload
 
 
+def test_effective_interaction_solver_adds_model_correlation(tmp_path):
+    block_dir = tmp_path / "block_0000"
+    block_dir.mkdir()
+    npz_path = block_dir / "cluster_hamiltonian_block_0000.npz"
+    rotation = np.asarray([[1.0, 1.0], [1.0, -1.0]]) / 2.0**0.5
+    h = rotation @ np.diag([1.0, 3.0]) @ rotation.T
+    np.savez_compressed(
+        npz_path,
+        hamiltonian_orthogonalized=np.asarray([h]),
+        density_orthogonalized=np.asarray([[[1.0, 0.0], [0.0, 1.0]]]),
+        overlap_orthogonalized=np.eye(2),
+    )
+    (tmp_path / "cluster_hamiltonians.json").write_text(
+        json.dumps(
+            {
+                "num_blocks": 1,
+                "ready": True,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "npz_path": str(npz_path),
+                        "cluster_basis_size": 2,
+                        "orthogonalized_basis_size": 2,
+                    }
+                ],
+            }
+        )
+    )
+    (tmp_path / "cluster_solver_results.json").write_text(
+        json.dumps({"solver_level": "one-electron-lowdin-cluster-reference-v1"})
+    )
+
+    payload = adapter.write_effective_correlated_results_manifest(
+        tmp_path,
+        effective_interaction_u_ev=1.0,
+        denominator_shift_ev=0.0,
+    )
+    block = payload["blocks"][0]
+
+    assert payload["ready"] is True
+    assert payload["solver_kind"] == "model_correlated_effective_interaction"
+    assert payload["uses_ab_initio_two_electron_integrals"] is False
+    assert payload["correlated_solver_status"] == "model_effective_interaction_solved"
+    assert block["solver_status"] == "solved"
+    assert block["correlation_energy_ev"] == pytest.approx(-0.125)
+    assert payload["total_correlation_energy_ev"] == pytest.approx(-0.125)
+    assert block["spin_channels"][0]["pair_terms_sample"][0]["coupling_ev"] == pytest.approx(0.5)
+    assert json.loads((tmp_path / "effective_correlated_results.json").read_text()) == payload
+
+
 def test_read_run_config_from_environment(tmp_path):
     config = adapter.read_run_config(
         {
@@ -1367,6 +1486,8 @@ def test_read_run_config_from_environment(tmp_path):
             "EWF_PREDICTIVE_BOUNDARY": "true",
             "EWF_PREDICTIVE_BOUNDARY_DAMPING": "0.25",
             "EWF_PREDICTIVE_BOUNDARY_RERUN": "true",
+            "EWF_EFFECTIVE_INTERACTION_U_EV": "1.5",
+            "EWF_EFFECTIVE_INTERACTION_DENOMINATOR_SHIFT_EV": "0.02",
         }
     )
 
@@ -1384,6 +1505,8 @@ def test_read_run_config_from_environment(tmp_path):
     assert config.predictive_boundary is True
     assert config.predictive_boundary_damping == 0.25
     assert config.predictive_boundary_rerun is True
+    assert config.effective_interaction_u_ev == 1.5
+    assert config.effective_interaction_denominator_shift_ev == 0.02
     assert config.solver.ntpoly_method == 2
     assert config.solver.ntpoly_filter == 1.0e-8
     assert config.solver.ntpoly_tolerance == 1.0e-5

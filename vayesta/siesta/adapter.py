@@ -135,6 +135,8 @@ class SiestaRunConfig:
     predictive_boundary: bool = False
     predictive_boundary_damping: float = 1.0
     predictive_boundary_rerun: bool = False
+    effective_interaction_u_ev: float = 0.0
+    effective_interaction_denominator_shift_ev: float = 1.0e-6
     solver: SiestaSolverConfig = dataclasses.field(default_factory=SiestaSolverConfig)
 
 
@@ -496,6 +498,11 @@ class SiestaBlockWorkflow:
                 payload["predictive_ewf_closure"] = write_predictive_ewf_closure_manifest(self.config.workdir)
                 payload["cluster_hamiltonians"] = write_cluster_hamiltonians_manifest(self.config.workdir)
                 payload["cluster_solver_results"] = write_cluster_solver_results_manifest(self.config.workdir)
+                payload["effective_correlated_results"] = write_effective_correlated_results_manifest(
+                    self.config.workdir,
+                    effective_interaction_u_ev=self.config.effective_interaction_u_ev,
+                    denominator_shift_ev=self.config.effective_interaction_denominator_shift_ev,
+                )
                 payload["embedded_observables"] = write_embedded_observables_manifest(self.config.workdir)
             payload["validation"] = write_validation_manifest(
                 self.config.workdir,
@@ -1589,6 +1596,82 @@ def write_cluster_solver_results_manifest(workdir: str | os.PathLike[str]) -> di
     return solve_cluster_hamiltonians(workdir)
 
 
+def solve_effective_interaction_clusters(
+    workdir: str | os.PathLike[str],
+    effective_interaction_u_ev: float = 0.0,
+    denominator_shift_ev: float = 1.0e-6,
+) -> dict:
+    """Run a model correlated solver on solved cluster Hamiltonians.
+
+    This is an explicit prototype for plumbing correlated corrections through
+    the EWF/SIESTA path.  It uses a local Hubbard-like effective interaction in
+    the Lowdin cluster basis; it is not an ab-initio two-electron integral path.
+    """
+
+    workdir = Path(workdir)
+    clusters = _read_optional_json(workdir / "cluster_hamiltonians.json") or {}
+    cluster_solver = _read_optional_json(workdir / "cluster_solver_results.json") or {}
+    blocks = []
+    blockers = []
+    for block in clusters.get("blocks", []):
+        try:
+            blocks.append(
+                _solve_effective_interaction_cluster_block(
+                    block,
+                    effective_interaction_u_ev=float(effective_interaction_u_ev),
+                    denominator_shift_ev=float(denominator_shift_ev),
+                )
+            )
+        except Exception as exc:
+            block_id = block.get("block_id", "unknown")
+            blockers.append(f"Block {block_id} effective interaction solver failed: {exc}")
+    corrections = [
+        block["correlation_energy_ev"]
+        for block in blocks
+        if block.get("correlation_energy_ev") is not None
+    ]
+    payload = {
+        "version": 1,
+        "solver_level": "effective-interaction-second-order-cluster-v1",
+        "solver_kind": "model_correlated_effective_interaction",
+        "interaction_model": "local-hubbard-like-lowdin-orbital-overlap",
+        "uses_ab_initio_two_electron_integrals": False,
+        "uses_reference_energy": False,
+        "effective_interaction_u_ev": float(effective_interaction_u_ev),
+        "denominator_shift_ev": float(denominator_shift_ev),
+        "input_cluster_solver_level": cluster_solver.get("solver_level"),
+        "num_blocks": int(clusters.get("num_blocks", len(blocks))),
+        "num_solved_blocks": len(blocks),
+        "ready": len(blocks) == int(clusters.get("num_blocks", len(blocks))) and not blockers,
+        "correlated_solver_status": "model_effective_interaction_solved",
+        "production_predictive_physics_ready": False,
+        "production_blockers": [
+            "Effective interaction U is model supplied, not derived from SIESTA two-electron integrals",
+            "Correlation formula is a second-order prototype, not a validated EWF solver kernel",
+            "No chemical-potential self-consistency loop is coupled to this correction",
+        ],
+        "total_correlation_energy_ev": float(sum(corrections)) if corrections else None,
+        "blockers": blockers,
+        "blocks": blocks,
+    }
+    (workdir / "effective_correlated_results.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
+def write_effective_correlated_results_manifest(
+    workdir: str | os.PathLike[str],
+    effective_interaction_u_ev: float = 0.0,
+    denominator_shift_ev: float = 1.0e-6,
+) -> dict:
+    """Write `effective_correlated_results.json` from cluster Hamiltonian NPZ files."""
+
+    return solve_effective_interaction_clusters(
+        workdir,
+        effective_interaction_u_ev=effective_interaction_u_ev,
+        denominator_shift_ev=denominator_shift_ev,
+    )
+
+
 def write_siesta_embedding_potential_inputs(workdir: str | os.PathLike[str]) -> dict:
     """Write block-local SIESTA embedding potential files and FDF hooks."""
 
@@ -1834,6 +1917,7 @@ def attach_siesta_results_to_fragments(
     predictive_ewf_closure: dict | None = None,
     cluster_hamiltonians: dict | None = None,
     cluster_solver_results: dict | None = None,
+    effective_correlated_results: dict | None = None,
 ) -> list[object]:
     """Attach projected SIESTA EWF results to Vayesta fragments by block id."""
 
@@ -1869,6 +1953,8 @@ def attach_siesta_results_to_fragments(
             _attach_cluster_hamiltonian_to_fragment(fragment, int(block_id), cluster_hamiltonians)
         if cluster_solver_results:
             _attach_cluster_solver_result_to_fragment(fragment, int(block_id), cluster_solver_results)
+        if effective_correlated_results:
+            _attach_effective_correlated_result_to_fragment(fragment, int(block_id), effective_correlated_results)
         attached.append(fragment)
     return attached
 
@@ -1892,6 +1978,7 @@ def load_siesta_results_to_fragments(
     predictive_closure = _read_optional_json(Path(workdir) / "predictive_ewf_closure.json")
     cluster_hamiltonians = _read_optional_json(Path(workdir) / "cluster_hamiltonians.json")
     cluster_solver_results = _read_optional_json(Path(workdir) / "cluster_solver_results.json")
+    effective_correlated_results = _read_optional_json(Path(workdir) / "effective_correlated_results.json")
     return attach_siesta_results_to_fragments(
         fragments,
         results,
@@ -1899,6 +1986,7 @@ def load_siesta_results_to_fragments(
         predictive_ewf_closure=predictive_closure,
         cluster_hamiltonians=cluster_hamiltonians,
         cluster_solver_results=cluster_solver_results,
+        effective_correlated_results=effective_correlated_results,
     )
 
 
@@ -1936,6 +2024,12 @@ def read_run_config(environ: dict[str, str] | None = None) -> SiestaRunConfig:
         predictive_boundary=_get_bool(environ, "EWF_PREDICTIVE_BOUNDARY", False),
         predictive_boundary_damping=_get_positive_float(environ, "EWF_PREDICTIVE_BOUNDARY_DAMPING", 1.0),
         predictive_boundary_rerun=_get_bool(environ, "EWF_PREDICTIVE_BOUNDARY_RERUN", False),
+        effective_interaction_u_ev=_get_nonnegative_float(environ, "EWF_EFFECTIVE_INTERACTION_U_EV", 0.0),
+        effective_interaction_denominator_shift_ev=_get_positive_float(
+            environ,
+            "EWF_EFFECTIVE_INTERACTION_DENOMINATOR_SHIFT_EV",
+            1.0e-6,
+        ),
         solver=solver,
     )
 
@@ -2544,6 +2638,7 @@ def build_embedded_observables(workdir: str | os.PathLike[str]) -> dict:
     global_matrices = _read_optional_json(workdir / "global_matrices.json") or {}
     predictive_closure = _read_optional_json(workdir / "predictive_ewf_closure.json") or {}
     cluster_solver = _read_optional_json(workdir / "cluster_solver_results.json") or {}
+    effective = _read_optional_json(workdir / "effective_correlated_results.json") or {}
     energy_corrections = [
         float(correction.get("energy_correction_ev", 0.0))
         for correction in corrections.get("corrections", [])
@@ -2553,6 +2648,9 @@ def build_embedded_observables(workdir: str | os.PathLike[str]) -> dict:
     total_energy = None
     if total_block_energy is not None:
         total_energy = float(total_block_energy) + float(sum(energy_corrections))
+    effective_total_energy = None
+    if total_energy is not None and effective.get("total_correlation_energy_ev") is not None:
+        effective_total_energy = float(total_energy) + float(effective["total_correlation_energy_ev"])
     return {
         "version": 1,
         "observable_level": "minimal-embedded-closure",
@@ -2586,6 +2684,13 @@ def build_embedded_observables(workdir: str | os.PathLike[str]) -> dict:
             "total_aufbau_one_electron_energy_ev"
         ),
         "cluster_solver_correlated_status": cluster_solver.get("correlated_solver_status"),
+        "effective_correlated_solver_level": effective.get("solver_level"),
+        "effective_correlated_solver_kind": effective.get("solver_kind"),
+        "effective_correlated_results_ready": effective.get("ready"),
+        "effective_correlation_energy_ev": effective.get("total_correlation_energy_ev"),
+        "effective_embedded_total_energy_ev": effective_total_energy,
+        "effective_correlated_status": effective.get("correlated_solver_status"),
+        "effective_interaction_u_ev": effective.get("effective_interaction_u_ev"),
     }
 
 
@@ -2769,6 +2874,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     predictive_closure = _read_optional_json(workdir / "predictive_ewf_closure.json") or {}
     clusters = _read_optional_json(workdir / "cluster_hamiltonians.json") or {}
     cluster_solver = _read_optional_json(workdir / "cluster_solver_results.json") or {}
+    effective = _read_optional_json(workdir / "effective_correlated_results.json") or {}
 
     backend_ready = bool(validation.get("ok"))
     blockers = []
@@ -2809,6 +2915,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     predictive_ewf_closure_ready = predictive_closure.get("status") == "ready"
     cluster_hamiltonians_ready = clusters.get("ready") is True
     cluster_solver_ready = cluster_solver.get("ready") is True
+    effective_correlated_ready = effective.get("ready") is True
     return {
         "version": 1,
         "backend_artifacts_ready": backend_ready,
@@ -2819,6 +2926,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
         "predictive_ewf_closure_ready": predictive_ewf_closure_ready,
         "cluster_hamiltonians_ready": cluster_hamiltonians_ready,
         "cluster_solver_results_ready": cluster_solver_ready,
+        "effective_correlated_results_ready": effective_correlated_ready,
         "production_predictive_physics_ready": bool(predictive_closure.get("production_predictive_physics_ready")),
         "benchmark_manifest_ready": benchmark_manifest_ready,
         "reference_benchmark_ready": reference_benchmark_ready,
@@ -2871,6 +2979,15 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             ),
             "cluster_solver_total_aufbau_one_electron_energy_ev": cluster_solver.get(
                 "total_aufbau_one_electron_energy_ev"
+            ),
+            "effective_correlated_solver_level": effective.get("solver_level"),
+            "effective_correlated_solver_kind": effective.get("solver_kind"),
+            "effective_correlated_ready": effective.get("ready"),
+            "effective_correlated_status": effective.get("correlated_solver_status"),
+            "effective_interaction_u_ev": effective.get("effective_interaction_u_ev"),
+            "effective_correlation_energy_ev": effective.get("total_correlation_energy_ev"),
+            "effective_uses_ab_initio_two_electron_integrals": effective.get(
+                "uses_ab_initio_two_electron_integrals"
             ),
             "embedded_total_energy_ev": observables.get("embedded_total_energy_ev"),
             "benchmark_ok": benchmark.get("ok"),
@@ -3365,6 +3482,30 @@ def _attach_cluster_solver_result_to_fragment(fragment: object, block_id: int, s
     )
     fragment.siesta_cluster_aufbau_energy_ev = None if block_result is None else block_result.get(
         "aufbau_one_electron_energy_ev"
+    )
+
+
+def _attach_effective_correlated_result_to_fragment(fragment: object, block_id: int, payload: dict) -> None:
+    block_result = next(
+        (dict(block) for block in payload.get("blocks", []) if int(block.get("block_id", -1)) == block_id),
+        None,
+    )
+    fragment.siesta_effective_correlated_results_ready = payload.get("ready") is True
+    fragment.siesta_effective_correlated_manifest = {
+        "version": payload.get("version"),
+        "solver_level": payload.get("solver_level"),
+        "solver_kind": payload.get("solver_kind"),
+        "ready": payload.get("ready"),
+        "correlated_solver_status": payload.get("correlated_solver_status"),
+        "uses_ab_initio_two_electron_integrals": payload.get("uses_ab_initio_two_electron_integrals"),
+        "effective_interaction_u_ev": payload.get("effective_interaction_u_ev"),
+    }
+    fragment.siesta_effective_correlated_result = block_result
+    fragment.siesta_effective_correlation_energy_ev = None if block_result is None else block_result.get(
+        "correlation_energy_ev"
+    )
+    fragment.siesta_effective_correlated_solver_status = None if block_result is None else block_result.get(
+        "solver_status"
     )
 
 
@@ -4072,6 +4213,90 @@ def _aufbau_occupations(norb: int, electron_count: float, max_occupation: float)
     return occupations
 
 
+def _solve_effective_interaction_cluster_block(
+    block: dict,
+    effective_interaction_u_ev: float,
+    denominator_shift_ev: float,
+) -> dict:
+    npz_path = Path(block["npz_path"])
+    arrays = np.load(npz_path)
+    h_orth = np.asarray(arrays["hamiltonian_orthogonalized"], dtype=float)
+    d_orth = np.asarray(arrays["density_orthogonalized"], dtype=float)
+    if h_orth.ndim != 3 or d_orth.shape != h_orth.shape:
+        raise ValueError("cluster Hamiltonian and density arrays must have matching (nspin, norb, norb) shape")
+    nspin = int(h_orth.shape[0])
+    max_occupation = 2.0 if nspin == 1 else 1.0
+    total_corr = 0.0
+    spin_channels = []
+    for spin in range(nspin):
+        h_spin = _symmetrize_dense(h_orth[spin])
+        d_spin = _symmetrize_dense(d_orth[spin])
+        eigenvalues, eigenvectors = np.linalg.eigh(h_spin)
+        electron_count = float(np.trace(d_spin))
+        occupations = _aufbau_occupations(eigenvalues.size, electron_count, max_occupation)
+        occupation_fractions = occupations / max_occupation if max_occupation else occupations
+        pair_terms = []
+        spin_corr = 0.0
+        for occ_index, occ_fraction in enumerate(occupation_fractions):
+            if occ_fraction <= 0.0:
+                continue
+            for virt_index, virt_fraction_occupied in enumerate(occupation_fractions):
+                virt_fraction = 1.0 - float(virt_fraction_occupied)
+                if virt_index <= occ_index or virt_fraction <= 0.0:
+                    continue
+                denominator = float(eigenvalues[virt_index] - eigenvalues[occ_index] + denominator_shift_ev)
+                if denominator <= 0.0:
+                    continue
+                coupling = _effective_interaction_coupling(
+                    eigenvectors[:, occ_index],
+                    eigenvectors[:, virt_index],
+                    effective_interaction_u_ev,
+                )
+                energy = -float(occ_fraction) * virt_fraction * coupling * coupling / denominator
+                spin_corr += energy
+                if len(pair_terms) < 32:
+                    pair_terms.append(
+                        {
+                            "occupied_orbital": int(occ_index),
+                            "virtual_orbital": int(virt_index),
+                            "occupation_fraction": float(occ_fraction),
+                            "virtual_fraction": float(virt_fraction),
+                            "denominator_ev": denominator,
+                            "coupling_ev": coupling,
+                            "energy_contribution_ev": energy,
+                        }
+                    )
+        total_corr += spin_corr
+        spin_channels.append(
+            {
+                "spin": spin,
+                "electron_count_from_density": electron_count,
+                "num_orbitals": int(eigenvalues.size),
+                "num_pair_terms_sampled": len(pair_terms),
+                "correlation_energy_ev": float(spin_corr),
+                "pair_terms_sample": pair_terms,
+            }
+        )
+    return {
+        "block_id": int(block["block_id"]),
+        "cluster_npz_path": str(npz_path),
+        "solver_status": "solved",
+        "solver_kind": "model_correlated_effective_interaction",
+        "interaction_model": "local-hubbard-like-lowdin-orbital-overlap",
+        "uses_ab_initio_two_electron_integrals": False,
+        "effective_interaction_u_ev": float(effective_interaction_u_ev),
+        "denominator_shift_ev": float(denominator_shift_ev),
+        "correlation_energy_ev": float(total_corr),
+        "cluster_basis_size": int(block["cluster_basis_size"]),
+        "orthogonalized_basis_size": int(block["orthogonalized_basis_size"]),
+        "spin_channels": spin_channels,
+    }
+
+
+def _effective_interaction_coupling(occupied_vector: np.ndarray, virtual_vector: np.ndarray, u_ev: float) -> float:
+    return float(u_ev) * float(np.sum((np.asarray(occupied_vector) ** 2) * (np.asarray(virtual_vector) ** 2)))
+
+
 def _predictive_boundary_error_term(term: dict, reason: str) -> dict:
     return {
         "block_id": int(term["block_id"]),
@@ -4701,6 +4926,13 @@ def _get_positive_float(environ: dict[str, str], name: str, default: float) -> f
     value = float(environ.get(name, default))
     if value <= 0:
         raise ValueError(f"{name} must be positive")
+    return value
+
+
+def _get_nonnegative_float(environ: dict[str, str], name: str, default: float) -> float:
+    value = float(environ.get(name, default))
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative")
     return value
 
 
