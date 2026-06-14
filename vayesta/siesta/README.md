@@ -248,6 +248,9 @@ block artifacts:
 - `predictive_ewf_closure.json` records an unreferenced mean-field EWF closure
   diagnostic: boundary-density SVD bath ranks, external embedding-potential
   expectation values, and a double-counting correction diagnostic.
+- `cluster_hamiltonians.json` records solver-ready one-electron cluster
+  artifacts.  Each block writes a compressed NPZ with core AO + SVD bath basis
+  coefficients, Lowdin orthogonalizer, and orthogonalized H/S/DM arrays.
 
 When these files are present and validation passes, `physical_readiness.json`
 reports `embedded_observable_ready`.  This is a minimal embedding closure, not a
@@ -284,6 +287,7 @@ The public collection helpers are:
 - `write_predictive_boundary_potential_manifest(workdir)`: write `predictive_embedding_potential.json`.
 - `write_predictive_boundary_corrections_manifest(workdir)`: replace `boundary_corrections.json` with predictive boundary-coupling corrections.
 - `write_predictive_ewf_closure_manifest(workdir)`: write bath-rank and mean-field double-counting diagnostics from returned SIESTA matrices.
+- `write_cluster_hamiltonians_manifest(workdir)`: write per-block cluster Hamiltonian NPZ files and `cluster_hamiltonians.json`.
 - `summarize_run(workdir)`: build rank/block success, timing, and matrix-size metrics.
 - `write_run_summary_manifest(workdir)`: write those metrics to `run_summary.json`.
 - `compare_weak_scaling_runs(workdirs)`: compare multiple `run_summary.json` files.
