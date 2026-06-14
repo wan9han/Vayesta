@@ -257,6 +257,10 @@ block artifacts:
 - `ao_eri_contract.json` tells an external ERI producer exactly which
   `ao_eri_block_XXXX` arrays to provide, their required block-local AO shapes,
   and the `ao_ordering_fingerprint_block_XXXX` values that will be verified.
+  `write_pyscf_ao_eri_from_contract()` is a small PySCF `int2e` contract
+  producer for smoke tests and mapped small systems; each contract block must
+  provide explicit `pyscf_ao_indices`, because SIESTA-to-PySCF AO ordering
+  cannot be inferred safely.
 - `cluster_two_electron_integrals.json` can be generated from an external
   AO-basis ERI tensor with the same orbital ordering as the SIESTA-returned
   matrices.  It writes per-block `cluster_two_electron_integrals_block_XXXX.npz`
@@ -321,6 +325,7 @@ The public collection helpers are:
 - `write_cluster_hamiltonians_manifest(workdir)`: write per-block cluster Hamiltonian NPZ files and `cluster_hamiltonians.json`.
 - `write_cluster_solver_results_manifest(workdir)`: solve the cluster Hamiltonian NPZ files with the one-electron reference solver.
 - `write_ao_eri_contract_manifest(workdir, energy_unit="ev")`: write the per-block AO ERI producer contract and expected ordering fingerprints.
+- `write_pyscf_ao_eri_from_contract(mol, contract_path, output_path)`: write a PySCF `int2e` AO ERI NPZ following the contract when explicit `pyscf_ao_indices` are supplied.
 - `write_cluster_two_electron_integrals_from_ao_manifest(workdir, ao_integrals_npz_path, energy_unit=None)`: transform an external AO ERI tensor into per-block cluster eigenbasis `ovov` pair-coupling tensors.
 - `write_effective_correlated_results_manifest(workdir)`: compute the second-order effective-interaction correlation correction, using external `ovov` tensors when present and model U otherwise.
 - `write_effective_interaction_benchmark_scan_manifest(workdir, reference_observables, u_values_ev)`: quantify effective-interaction model response against a reference.

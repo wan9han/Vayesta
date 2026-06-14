@@ -1651,6 +1651,60 @@ def write_ao_eri_contract_manifest(
     return payload
 
 
+def write_pyscf_ao_eri_from_contract(
+    mol: object,
+    contract_path: str | os.PathLike[str],
+    output_path: str | os.PathLike[str],
+    manifest_path: str | os.PathLike[str] | None = None,
+) -> dict:
+    """Write a PySCF AO ERI NPZ following `ao_eri_contract.json`.
+
+    This helper is intentionally contract-driven.  Each block must provide
+    `pyscf_ao_indices`, because the adapter cannot infer a SIESTA-to-PySCF AO
+    ordering map safely.
+    """
+
+    contract_path = Path(contract_path)
+    output_path = Path(output_path)
+    manifest_path = Path(manifest_path) if manifest_path is not None else output_path.with_suffix(".manifest.json")
+    contract = json.loads(contract_path.read_text())
+    try:
+        ao_eri_hartree = np.asarray(mol.intor("int2e"), dtype=float)
+    except Exception as exc:
+        payload = _pyscf_ao_eri_producer_failure_payload(contract, output_path, f"PySCF int2e failed: {exc}")
+        manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        return payload
+    arrays: dict[str, np.ndarray] = {"energy_unit": np.asarray("hartree")}
+    blocks = []
+    blockers = []
+    for block in contract.get("blocks", []):
+        try:
+            block_payload = _pyscf_ao_eri_contract_block(mol, ao_eri_hartree, block)
+            arrays[block_payload["ao_eri_array_key"]] = block_payload.pop("_ao_eri")
+            arrays[block_payload["ao_ordering_fingerprint_key"]] = np.asarray(block_payload["ao_ordering_fingerprint"])
+            blocks.append(block_payload)
+        except Exception as exc:
+            block_id = block.get("block_id", "unknown")
+            blockers.append(f"Block {block_id} PySCF AO ERI production failed: {exc}")
+    if blocks:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(output_path, **arrays)
+    payload = {
+        "version": 1,
+        "producer_level": "pyscf-int2e-ao-eri-contract-v1",
+        "contract_path": str(contract_path),
+        "output_npz_path": str(output_path),
+        "energy_unit": "hartree",
+        "num_blocks": int(contract.get("num_blocks", len(contract.get("blocks", [])))),
+        "num_written_blocks": len(blocks),
+        "ready": len(blocks) == int(contract.get("num_blocks", len(contract.get("blocks", [])))) and not blockers,
+        "blockers": blockers,
+        "blocks": blocks,
+    }
+    manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
 def build_cluster_two_electron_integrals_from_ao(
     workdir: str | os.PathLike[str],
     ao_integrals_npz_path: str | os.PathLike[str],
@@ -4801,6 +4855,51 @@ def _build_ao_eri_contract_block(block: dict, energy_unit: str) -> dict:
         "core_orbital_indices": list(block.get("core_orbital_indices", [])),
         "environment_orbital_indices": list(block.get("environment_orbital_indices", [])),
         "ready": True,
+    }
+
+
+def _pyscf_ao_eri_contract_block(mol: object, ao_eri_hartree: np.ndarray, block: dict) -> dict:
+    if "pyscf_ao_indices" not in block:
+        raise ValueError("contract block is missing pyscf_ao_indices")
+    indices = [int(index) for index in block["pyscf_ao_indices"]]
+    expected_shape = list(block.get("required_ao_eri_shape", []))
+    if len(expected_shape) != 4 or len(set(expected_shape)) != 1:
+        raise ValueError("contract block has invalid required_ao_eri_shape")
+    if len(indices) != int(expected_shape[0]):
+        raise ValueError(
+            f"pyscf_ao_indices length {len(indices)} does not match required AO dimension {expected_shape[0]}"
+        )
+    nao = int(getattr(mol, "nao", ao_eri_hartree.shape[0]))
+    if any(index < 0 or index >= nao for index in indices):
+        raise ValueError("pyscf_ao_indices contain out-of-range AO indices")
+    block_eri = ao_eri_hartree[np.ix_(indices, indices, indices, indices)]
+    if list(block_eri.shape) != expected_shape:
+        raise ValueError(f"produced AO ERI shape {list(block_eri.shape)} does not match contract {expected_shape}")
+    return {
+        "block_id": int(block["block_id"]),
+        "ao_eri_array_key": block["ao_eri_array_key"],
+        "ao_ordering_fingerprint_key": block["ao_ordering_fingerprint_key"],
+        "ao_ordering_fingerprint": block["ao_ordering_fingerprint"],
+        "pyscf_ao_indices": indices,
+        "required_ao_eri_shape": expected_shape,
+        "ao_dimension": len(indices),
+        "max_abs_eri_hartree": float(np.max(np.abs(block_eri))) if block_eri.size else 0.0,
+        "ready": True,
+        "_ao_eri": block_eri,
+    }
+
+
+def _pyscf_ao_eri_producer_failure_payload(contract: dict, output_path: Path, reason: str) -> dict:
+    return {
+        "version": 1,
+        "producer_level": "pyscf-int2e-ao-eri-contract-v1",
+        "output_npz_path": str(output_path),
+        "energy_unit": "hartree",
+        "num_blocks": int(contract.get("num_blocks", len(contract.get("blocks", [])))),
+        "num_written_blocks": 0,
+        "ready": False,
+        "blockers": [reason],
+        "blocks": [],
     }
 
 

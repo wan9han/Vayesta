@@ -1669,6 +1669,79 @@ def test_ao_eri_contract_manifest_exports_block_keys_and_fingerprints(tmp_path):
     assert json.loads((tmp_path / "ao_eri_contract.json").read_text()) == contract
 
 
+def test_pyscf_ao_eri_producer_writes_contract_npz(tmp_path):
+    import pyscf.gto
+
+    mol = pyscf.gto.Mole()
+    mol.atom = "H 0 0 0; H 0 0 0.74"
+    mol.basis = "sto-3g"
+    mol.verbose = 0
+    mol.build()
+    nao = mol.nao_nr()
+    fingerprint = "b" * 64
+    contract = {
+        "version": 1,
+        "contract_level": "external-ao-eri-producer-contract-v1",
+        "num_blocks": 1,
+        "blocks": [
+            {
+                "block_id": 0,
+                "ao_eri_array_key": "ao_eri_block_0000",
+                "ao_ordering_fingerprint_key": "ao_ordering_fingerprint_block_0000",
+                "ao_ordering_fingerprint": fingerprint,
+                "required_ao_eri_shape": [nao, nao, nao, nao],
+                "pyscf_ao_indices": list(range(nao)),
+            }
+        ],
+    }
+    contract_path = tmp_path / "ao_eri_contract.json"
+    output_path = tmp_path / "pyscf_ao_eri.npz"
+    contract_path.write_text(json.dumps(contract))
+
+    payload = adapter.write_pyscf_ao_eri_from_contract(mol, contract_path, output_path)
+    arrays = np.load(output_path)
+
+    assert payload["ready"] is True
+    assert payload["producer_level"] == "pyscf-int2e-ao-eri-contract-v1"
+    assert payload["num_written_blocks"] == 1
+    assert payload["blocks"][0]["ao_eri_array_key"] == "ao_eri_block_0000"
+    assert payload["blocks"][0]["ao_ordering_fingerprint"] == fingerprint
+    assert arrays["energy_unit"].item() == "hartree"
+    assert arrays["ao_eri_block_0000"].shape == (nao, nao, nao, nao)
+    assert arrays["ao_ordering_fingerprint_block_0000"].item() == fingerprint
+
+
+def test_pyscf_ao_eri_producer_reports_missing_ao_mapping(tmp_path):
+    import pyscf.gto
+
+    mol = pyscf.gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g", verbose=0)
+    contract_path = tmp_path / "ao_eri_contract.json"
+    output_path = tmp_path / "pyscf_ao_eri.npz"
+    contract_path.write_text(
+        json.dumps(
+            {
+                "num_blocks": 1,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "ao_eri_array_key": "ao_eri_block_0000",
+                        "ao_ordering_fingerprint_key": "ao_ordering_fingerprint_block_0000",
+                        "ao_ordering_fingerprint": "c" * 64,
+                        "required_ao_eri_shape": [1, 1, 1, 1],
+                    }
+                ],
+            }
+        )
+    )
+
+    payload = adapter.write_pyscf_ao_eri_from_contract(mol, contract_path, output_path)
+
+    assert payload["ready"] is False
+    assert payload["num_written_blocks"] == 0
+    assert "missing pyscf_ao_indices" in payload["blockers"][0]
+    assert not output_path.exists()
+
+
 def test_cluster_two_electron_integral_transform_feeds_effective_solver(tmp_path):
     block_dir = tmp_path / "block_0000"
     block_dir.mkdir()

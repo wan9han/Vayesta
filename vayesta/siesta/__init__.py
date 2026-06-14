@@ -86,6 +86,7 @@ from vayesta.siesta.adapter import (
     write_predictive_boundary_corrections_manifest,
     write_predictive_boundary_potential_manifest,
     write_predictive_ewf_closure_manifest,
+    write_pyscf_ao_eri_from_contract,
     write_validation_manifest,
     write_weak_scaling_report,
     write_results_manifest,
