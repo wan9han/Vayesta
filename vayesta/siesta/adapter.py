@@ -1601,11 +1601,11 @@ def solve_effective_interaction_clusters(
     effective_interaction_u_ev: float = 0.0,
     denominator_shift_ev: float = 1.0e-6,
 ) -> dict:
-    """Run a model correlated solver on solved cluster Hamiltonians.
+    """Run a second-order correlated solver on solved cluster Hamiltonians.
 
-    This is an explicit prototype for plumbing correlated corrections through
-    the EWF/SIESTA path.  It uses a local Hubbard-like effective interaction in
-    the Lowdin cluster basis; it is not an ab-initio two-electron integral path.
+    If a block advertises ``two_electron_integrals_npz_path`` this consumes an
+    external ab-initio effective interaction tensor in the cluster eigenbasis.
+    Otherwise it falls back to the local Hubbard-like model interaction.
     """
 
     workdir = Path(workdir)
@@ -1630,12 +1630,32 @@ def solve_effective_interaction_clusters(
         for block in blocks
         if block.get("correlation_energy_ev") is not None
     ]
+    uses_ab_initio = bool(blocks) and all(block.get("uses_ab_initio_two_electron_integrals") is True for block in blocks)
+    solver_kind = (
+        "ab_initio_effective_interaction_second_order"
+        if uses_ab_initio
+        else "model_correlated_effective_interaction"
+    )
+    interaction_model = (
+        "external-cluster-two-electron-ovov"
+        if uses_ab_initio
+        else "local-hubbard-like-lowdin-orbital-overlap"
+    )
+    production_blockers = [
+        "Correlation formula is a second-order prototype, not a validated EWF solver kernel",
+        "No chemical-potential self-consistency loop is coupled to this correction",
+    ]
+    if not uses_ab_initio:
+        production_blockers.insert(
+            0,
+            "Effective interaction U is model supplied, not derived from SIESTA two-electron integrals",
+        )
     payload = {
         "version": 1,
         "solver_level": "effective-interaction-second-order-cluster-v1",
-        "solver_kind": "model_correlated_effective_interaction",
-        "interaction_model": "local-hubbard-like-lowdin-orbital-overlap",
-        "uses_ab_initio_two_electron_integrals": False,
+        "solver_kind": solver_kind,
+        "interaction_model": interaction_model,
+        "uses_ab_initio_two_electron_integrals": uses_ab_initio,
         "uses_reference_energy": False,
         "effective_interaction_u_ev": float(effective_interaction_u_ev),
         "denominator_shift_ev": float(denominator_shift_ev),
@@ -1643,13 +1663,11 @@ def solve_effective_interaction_clusters(
         "num_blocks": int(clusters.get("num_blocks", len(blocks))),
         "num_solved_blocks": len(blocks),
         "ready": len(blocks) == int(clusters.get("num_blocks", len(blocks))) and not blockers,
-        "correlated_solver_status": "model_effective_interaction_solved",
+        "correlated_solver_status": (
+            "ab_initio_effective_interaction_solved" if uses_ab_initio else "model_effective_interaction_solved"
+        ),
         "production_predictive_physics_ready": False,
-        "production_blockers": [
-            "Effective interaction U is model supplied, not derived from SIESTA two-electron integrals",
-            "Correlation formula is a second-order prototype, not a validated EWF solver kernel",
-            "No chemical-potential self-consistency loop is coupled to this correction",
-        ],
+        "production_blockers": production_blockers,
         "total_correlation_energy_ev": float(sum(corrections)) if corrections else None,
         "blockers": blockers,
         "blocks": blocks,
@@ -4352,6 +4370,9 @@ def _solve_effective_interaction_cluster_block(
         raise ValueError("cluster Hamiltonian and density arrays must have matching (nspin, norb, norb) shape")
     nspin = int(h_orth.shape[0])
     max_occupation = 2.0 if nspin == 1 else 1.0
+    integral_path = block.get("two_electron_integrals_npz_path")
+    integral_data = _load_cluster_two_electron_integrals(integral_path, nspin=nspin) if integral_path else None
+    uses_ab_initio = integral_data is not None
     total_corr = 0.0
     spin_channels = []
     for spin in range(nspin):
@@ -4373,11 +4394,19 @@ def _solve_effective_interaction_cluster_block(
                 denominator = float(eigenvalues[virt_index] - eigenvalues[occ_index] + denominator_shift_ev)
                 if denominator <= 0.0:
                     continue
-                coupling = _effective_interaction_coupling(
-                    eigenvectors[:, occ_index],
-                    eigenvectors[:, virt_index],
-                    effective_interaction_u_ev,
-                )
+                if uses_ab_initio:
+                    coupling = _ab_initio_effective_interaction_coupling(
+                        integral_data["ovov"],
+                        spin,
+                        occ_index,
+                        virt_index,
+                    )
+                else:
+                    coupling = _effective_interaction_coupling(
+                        eigenvectors[:, occ_index],
+                        eigenvectors[:, virt_index],
+                        effective_interaction_u_ev,
+                    )
                 energy = -float(occ_fraction) * virt_fraction * coupling * coupling / denominator
                 spin_corr += energy
                 if len(pair_terms) < 32:
@@ -4407,9 +4436,19 @@ def _solve_effective_interaction_cluster_block(
         "block_id": int(block["block_id"]),
         "cluster_npz_path": str(npz_path),
         "solver_status": "solved",
-        "solver_kind": "model_correlated_effective_interaction",
-        "interaction_model": "local-hubbard-like-lowdin-orbital-overlap",
-        "uses_ab_initio_two_electron_integrals": False,
+        "solver_kind": (
+            "ab_initio_effective_interaction_second_order"
+            if uses_ab_initio
+            else "model_correlated_effective_interaction"
+        ),
+        "interaction_model": (
+            "external-cluster-two-electron-ovov"
+            if uses_ab_initio
+            else "local-hubbard-like-lowdin-orbital-overlap"
+        ),
+        "two_electron_integrals_npz_path": str(integral_path) if integral_path else None,
+        "two_electron_integrals_format": integral_data["format"] if uses_ab_initio else None,
+        "uses_ab_initio_two_electron_integrals": uses_ab_initio,
         "effective_interaction_u_ev": float(effective_interaction_u_ev),
         "denominator_shift_ev": float(denominator_shift_ev),
         "correlation_energy_ev": float(total_corr),
@@ -4417,6 +4456,37 @@ def _solve_effective_interaction_cluster_block(
         "orthogonalized_basis_size": int(block["orthogonalized_basis_size"]),
         "spin_channels": spin_channels,
     }
+
+
+def _load_cluster_two_electron_integrals(path: str | os.PathLike[str], nspin: int) -> dict:
+    arrays = np.load(Path(path))
+    if "ovov" not in arrays:
+        raise ValueError("two-electron integral NPZ must contain an ovov array")
+    ovov = np.asarray(arrays["ovov"], dtype=float)
+    if ovov.ndim == 2:
+        if int(nspin) != 1:
+            raise ValueError("spin-resolved run requires ovov shape (nspin, nocc, nvirt)")
+        ovov = ovov.reshape((1, *ovov.shape))
+    if ovov.ndim != 3:
+        raise ValueError("ovov array must have shape (nocc, nvirt) or (nspin, nocc, nvirt)")
+    if ovov.shape[0] not in (1, int(nspin)):
+        raise ValueError("ovov spin dimension must be 1 or match the cluster spin dimension")
+    return {
+        "format": str(arrays["format"]) if "format" in arrays else "cluster-eigenbasis-ovov-v1",
+        "ovov": ovov,
+    }
+
+
+def _ab_initio_effective_interaction_coupling(
+    ovov: np.ndarray,
+    spin: int,
+    occupied_index: int,
+    virtual_index: int,
+) -> float:
+    spin_index = 0 if ovov.shape[0] == 1 else int(spin)
+    if occupied_index >= ovov.shape[1] or virtual_index >= ovov.shape[2]:
+        return 0.0
+    return float(ovov[spin_index, occupied_index, virtual_index])
 
 
 def _effective_interaction_coupling(occupied_vector: np.ndarray, virtual_vector: np.ndarray, u_ev: float) -> float:

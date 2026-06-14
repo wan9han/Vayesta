@@ -254,10 +254,13 @@ block artifacts:
 - `cluster_solver_results.json` consumes those NPZ files with a one-electron
   Lowdin reference solver.  This verifies the solver interface but is not a
   correlated EWF solver.
-- `effective_correlated_results.json` applies a configurable Hubbard-like
-  effective interaction to the cluster eigenbasis.  It produces a model
-  correlation correction while explicitly recording that no ab-initio
-  two-electron integrals are used.
+- `effective_correlated_results.json` applies a second-order cluster
+  correlation prototype.  By default it uses a configurable Hubbard-like model
+  interaction and explicitly records that no ab-initio two-electron integrals
+  are used.  If a `cluster_hamiltonians.json` block includes
+  `two_electron_integrals_npz_path`, the solver instead consumes that NPZ's
+  `ovov` tensor in the cluster eigenbasis and records
+  `uses_ab_initio_two_electron_integrals=true`.
 - `effective_interaction_benchmark_scan.json` scans effective-interaction
   strengths against a reference observable and records whether a real
   nonnegative model U can improve or fit the reference energy.

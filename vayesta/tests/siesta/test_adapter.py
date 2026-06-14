@@ -1480,6 +1480,63 @@ def test_effective_interaction_solver_adds_model_correlation(tmp_path):
     assert json.loads((tmp_path / "effective_correlated_results.json").read_text()) == payload
 
 
+def test_effective_interaction_solver_consumes_external_two_electron_integrals(tmp_path):
+    block_dir = tmp_path / "block_0000"
+    block_dir.mkdir()
+    npz_path = block_dir / "cluster_hamiltonian_block_0000.npz"
+    integral_path = block_dir / "cluster_two_electron_integrals_block_0000.npz"
+    np.savez_compressed(
+        npz_path,
+        hamiltonian_orthogonalized=np.asarray([[[1.0, 0.0], [0.0, 3.0]]]),
+        density_orthogonalized=np.asarray([[[2.0, 0.0], [0.0, 0.0]]]),
+        overlap_orthogonalized=np.eye(2),
+    )
+    np.savez_compressed(
+        integral_path,
+        ovov=np.asarray([[0.25, 0.75]]),
+        format=np.asarray("cluster-eigenbasis-ovov-v1"),
+    )
+    (tmp_path / "cluster_hamiltonians.json").write_text(
+        json.dumps(
+            {
+                "num_blocks": 1,
+                "ready": True,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "npz_path": str(npz_path),
+                        "two_electron_integrals_npz_path": str(integral_path),
+                        "cluster_basis_size": 2,
+                        "orthogonalized_basis_size": 2,
+                    }
+                ],
+            }
+        )
+    )
+    (tmp_path / "cluster_solver_results.json").write_text(
+        json.dumps({"solver_level": "one-electron-lowdin-cluster-reference-v1"})
+    )
+
+    payload = adapter.write_effective_correlated_results_manifest(
+        tmp_path,
+        effective_interaction_u_ev=99.0,
+        denominator_shift_ev=0.0,
+    )
+    block = payload["blocks"][0]
+
+    assert payload["ready"] is True
+    assert payload["solver_kind"] == "ab_initio_effective_interaction_second_order"
+    assert payload["interaction_model"] == "external-cluster-two-electron-ovov"
+    assert payload["uses_ab_initio_two_electron_integrals"] is True
+    assert payload["correlated_solver_status"] == "ab_initio_effective_interaction_solved"
+    assert "Effective interaction U is model supplied" not in payload["production_blockers"]
+    assert block["uses_ab_initio_two_electron_integrals"] is True
+    assert block["two_electron_integrals_npz_path"] == str(integral_path)
+    assert block["spin_channels"][0]["pair_terms_sample"][0]["coupling_ev"] == pytest.approx(0.75)
+    assert block["correlation_energy_ev"] == pytest.approx(-(0.75**2) / 2.0)
+    assert payload["total_correlation_energy_ev"] == pytest.approx(-(0.75**2) / 2.0)
+
+
 def test_effective_interaction_benchmark_scan_reports_fit_direction(tmp_path):
     block_dir = tmp_path / "block_0000"
     block_dir.mkdir()
