@@ -272,7 +272,10 @@ block artifacts:
   are used.  If a `cluster_hamiltonians.json` block includes
   `two_electron_integrals_npz_path`, the solver instead consumes that NPZ's
   `ovov` tensor in the cluster eigenbasis and records
-  `uses_ab_initio_two_electron_integrals=true`.
+  `uses_ab_initio_two_electron_integrals=true`.  The manifest carries
+  `ao_ordering_verified`, and `embedded_observables.json` uses that flag to
+  label the effective energy policy as verified external ERI, unverified
+  external ERI, or model-U correction.
 - `effective_interaction_benchmark_scan.json` scans effective-interaction
   strengths against a reference observable and records whether a real
   nonnegative model U can improve or fit the reference energy.

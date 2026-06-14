@@ -1763,6 +1763,8 @@ def solve_effective_interaction_clusters(
         if block.get("correlation_energy_ev") is not None
     ]
     uses_ab_initio = bool(blocks) and all(block.get("uses_ab_initio_two_electron_integrals") is True for block in blocks)
+    ordering_verified = bool(blocks) and all(block.get("ao_ordering_verified") is True for block in blocks)
+    ordering_statuses = _unique_sorted_values(block.get("ao_ordering_status") for block in blocks)
     solver_kind = (
         "ab_initio_effective_interaction_second_order"
         if uses_ab_initio
@@ -1782,12 +1784,20 @@ def solve_effective_interaction_clusters(
             0,
             "Effective interaction U is model supplied, not derived from SIESTA two-electron integrals",
         )
+    elif not ordering_verified:
+        production_blockers.insert(
+            0,
+            "External two-electron integrals were consumed, but AO ordering was not verified for every block",
+        )
     payload = {
         "version": 1,
         "solver_level": "effective-interaction-second-order-cluster-v1",
         "solver_kind": solver_kind,
         "interaction_model": interaction_model,
         "uses_ab_initio_two_electron_integrals": uses_ab_initio,
+        "ao_ordering_verified": ordering_verified,
+        "ao_ordering_status": "verified" if ordering_verified else "unverified_external_ordering" if uses_ab_initio else None,
+        "ao_ordering_block_statuses": ordering_statuses,
         "uses_reference_energy": False,
         "effective_interaction_u_ev": float(effective_interaction_u_ev),
         "denominator_shift_ev": float(denominator_shift_ev),
@@ -2954,6 +2964,19 @@ def build_embedded_observables(workdir: str | os.PathLike[str]) -> dict:
         "effective_correlated_results_ready": effective.get("ready"),
         "effective_correlation_energy_ev": effective.get("total_correlation_energy_ev"),
         "effective_embedded_total_energy_ev": effective_total_energy,
+        "effective_energy_policy": (
+            "verified_external_eri_second_order_correction"
+            if effective.get("uses_ab_initio_two_electron_integrals") is True
+            and effective.get("ao_ordering_verified") is True
+            else "unverified_external_eri_second_order_correction"
+            if effective.get("uses_ab_initio_two_electron_integrals") is True
+            else "model_effective_interaction_second_order_correction"
+            if effective
+            else None
+        ),
+        "effective_uses_ab_initio_two_electron_integrals": effective.get("uses_ab_initio_two_electron_integrals"),
+        "effective_ao_ordering_status": effective.get("ao_ordering_status"),
+        "effective_ao_ordering_verified": effective.get("ao_ordering_verified"),
         "effective_correlated_status": effective.get("correlated_solver_status"),
         "effective_interaction_u_ev": effective.get("effective_interaction_u_ev"),
     }
@@ -3282,6 +3305,9 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "effective_uses_ab_initio_two_electron_integrals": effective.get(
                 "uses_ab_initio_two_electron_integrals"
             ),
+            "effective_ao_ordering_status": effective.get("ao_ordering_status"),
+            "effective_ao_ordering_verified": effective.get("ao_ordering_verified"),
+            "effective_ao_ordering_block_statuses": effective.get("ao_ordering_block_statuses"),
             "effective_interaction_scan_status": effective_scan.get("status"),
             "effective_interaction_scan_best_u_ev": (effective_scan.get("best_sample") or {}).get(
                 "effective_interaction_u_ev"
@@ -3802,6 +3828,8 @@ def _attach_effective_correlated_result_to_fragment(fragment: object, block_id: 
         "ready": payload.get("ready"),
         "correlated_solver_status": payload.get("correlated_solver_status"),
         "uses_ab_initio_two_electron_integrals": payload.get("uses_ab_initio_two_electron_integrals"),
+        "ao_ordering_status": payload.get("ao_ordering_status"),
+        "ao_ordering_verified": payload.get("ao_ordering_verified"),
         "effective_interaction_u_ev": payload.get("effective_interaction_u_ev"),
     }
     fragment.siesta_effective_correlated_result = block_result
@@ -4608,6 +4636,9 @@ def _solve_effective_interaction_cluster_block(
         ),
         "two_electron_integrals_npz_path": str(integral_path) if integral_path else None,
         "two_electron_integrals_format": integral_data["format"] if uses_ab_initio else None,
+        "ao_ordering_status": integral_data["ao_ordering_status"] if uses_ab_initio else None,
+        "ao_ordering_verified": integral_data["ao_ordering_verified"] if uses_ab_initio else None,
+        "ao_ordering_fingerprint": integral_data["ao_ordering_fingerprint"] if uses_ab_initio else None,
         "uses_ab_initio_two_electron_integrals": uses_ab_initio,
         "effective_interaction_u_ev": float(effective_interaction_u_ev),
         "denominator_shift_ev": float(denominator_shift_ev),
@@ -4743,6 +4774,17 @@ def _npz_optional_scalar_string(arrays: object, key: str, default: str) -> str:
     return str(value)
 
 
+def _npz_optional_bool(arrays: object, key: str, default: bool) -> bool:
+    if key not in arrays:
+        return bool(default)
+    value = arrays[key]
+    if isinstance(value, np.ndarray):
+        value = value.item() if value.shape == () else value.tolist()
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 def _unique_sorted_values(values: Iterable[object]) -> list[object]:
     return sorted({value for value in values if value is not None})
 
@@ -4786,8 +4828,15 @@ def _load_cluster_two_electron_integrals(path: str | os.PathLike[str], nspin: in
         raise ValueError("ovov array must have shape (norb, norb) or (nspin, norb, norb)")
     if ovov.shape[0] not in (1, int(nspin)):
         raise ValueError("ovov spin dimension must be 1 or match the cluster spin dimension")
+    ordering_verified = _npz_optional_bool(arrays, "ao_ordering_verified", False)
+    ordering_status = "verified" if ordering_verified else _npz_optional_scalar_string(
+        arrays, "ao_ordering_status", "unverified_external_ordering"
+    )
     return {
-        "format": str(arrays["format"]) if "format" in arrays else "cluster-eigenbasis-ovov-v1",
+        "format": _npz_optional_scalar_string(arrays, "format", "cluster-eigenbasis-ovov-v1"),
+        "ao_ordering_status": ordering_status,
+        "ao_ordering_verified": ordering_verified,
+        "ao_ordering_fingerprint": _npz_optional_scalar_string(arrays, "ao_ordering_fingerprint", ""),
         "ovov": ovov,
     }
 

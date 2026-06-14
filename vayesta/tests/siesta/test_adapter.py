@@ -1001,7 +1001,37 @@ def test_embedded_observables_manifest_combines_energy_and_electron_closure(tmp_
     assert payload["effective_correlated_results_ready"] is True
     assert payload["effective_correlation_energy_ev"] == -0.125
     assert payload["effective_embedded_total_energy_ev"] == -10.375
+    assert payload["effective_energy_policy"] == "model_effective_interaction_second_order_correction"
+    assert payload["effective_uses_ab_initio_two_electron_integrals"] is None
     assert json.loads((tmp_path / "embedded_observables.json").read_text()) == payload
+
+
+def test_embedded_observables_records_verified_external_eri_policy(tmp_path):
+    (tmp_path / "validation.json").write_text(json.dumps({"total_block_energy_ev": -10.0}))
+    (tmp_path / "boundary_corrections.json").write_text(json.dumps({"corrections": []}))
+    (tmp_path / "electron_constraint.json").write_text(json.dumps({}))
+    (tmp_path / "global_matrices.json").write_text(json.dumps({}))
+    (tmp_path / "effective_correlated_results.json").write_text(
+        json.dumps(
+            {
+                "solver_level": "effective-interaction-second-order-cluster-v1",
+                "solver_kind": "ab_initio_effective_interaction_second_order",
+                "ready": True,
+                "total_correlation_energy_ev": -0.5,
+                "correlated_solver_status": "ab_initio_effective_interaction_solved",
+                "uses_ab_initio_two_electron_integrals": True,
+                "ao_ordering_status": "verified",
+                "ao_ordering_verified": True,
+            }
+        )
+    )
+
+    payload = adapter.write_embedded_observables_manifest(tmp_path)
+
+    assert payload["effective_embedded_total_energy_ev"] == -10.5
+    assert payload["effective_energy_policy"] == "verified_external_eri_second_order_correction"
+    assert payload["effective_ao_ordering_status"] == "verified"
+    assert payload["effective_ao_ordering_verified"] is True
 
 
 def test_embedding_benchmark_manifest_compares_reference_observables(tmp_path):
@@ -1568,7 +1598,12 @@ def test_effective_interaction_solver_consumes_external_two_electron_integrals(t
     assert payload["uses_ab_initio_two_electron_integrals"] is True
     assert payload["correlated_solver_status"] == "ab_initio_effective_interaction_solved"
     assert "Effective interaction U is model supplied" not in payload["production_blockers"]
+    assert payload["ao_ordering_status"] == "unverified_external_ordering"
+    assert payload["ao_ordering_verified"] is False
+    assert "AO ordering was not verified" in payload["production_blockers"][0]
     assert block["uses_ab_initio_two_electron_integrals"] is True
+    assert block["ao_ordering_status"] == "unverified_external_ordering"
+    assert block["ao_ordering_verified"] is False
     assert block["two_electron_integrals_npz_path"] == str(integral_path)
     assert block["spin_channels"][0]["pair_terms_sample"][0]["coupling_ev"] == pytest.approx(0.75)
     assert block["correlation_energy_ev"] == pytest.approx(-(0.75**2) / 2.0)
@@ -1715,6 +1750,11 @@ def test_cluster_two_electron_integral_transform_verifies_source_fingerprint(tmp
     )
 
     tensors = adapter.write_cluster_two_electron_integrals_from_ao_manifest(tmp_path, ao_eri_path)
+    effective = adapter.write_effective_correlated_results_manifest(
+        tmp_path,
+        effective_interaction_u_ev=99.0,
+        denominator_shift_ev=0.0,
+    )
 
     assert tensors["ready"] is True
     assert tensors["ao_ordering_status"] == "verified"
@@ -1722,6 +1762,10 @@ def test_cluster_two_electron_integral_transform_verifies_source_fingerprint(tmp
     assert tensors["blocks"][0]["ao_ordering_verified"] is True
     assert tensors["blocks"][0]["ao_ordering_expected_fingerprint"] == expected
     assert np.load(tensors["blocks"][0]["npz_path"])["ao_ordering_verified"].item() is True
+    assert effective["uses_ab_initio_two_electron_integrals"] is True
+    assert effective["ao_ordering_status"] == "verified"
+    assert effective["ao_ordering_verified"] is True
+    assert effective["blocks"][0]["ao_ordering_verified"] is True
 
 
 def test_cluster_two_electron_integral_transform_rejects_fingerprint_mismatch(tmp_path):
