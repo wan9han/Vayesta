@@ -245,10 +245,13 @@ block artifacts:
 - `calibrate_boundary_corrections_to_reference(...)` can distribute a known
   reference energy difference over boundary correction slots.  This is a
   calibration path, not a predictive self-consistent boundary potential.
+- `predictive_ewf_closure.json` records an unreferenced mean-field EWF closure
+  diagnostic: boundary-density SVD bath ranks, external embedding-potential
+  expectation values, and a double-counting correction diagnostic.
 
 When these files are present and validation passes, `physical_readiness.json`
 reports `embedded_observable_ready`.  This is a minimal embedding closure, not a
-self-consistent bath-potential or high-level correlated EWF solver.
+self-consistent high-level correlated EWF solver.
 
 The public collection helpers are:
 
@@ -280,6 +283,7 @@ The public collection helpers are:
 - `build_predictive_boundary_potential(workdir)`: derive non-reference boundary potentials from returned SIESTA DM/HSX coupling terms.
 - `write_predictive_boundary_potential_manifest(workdir)`: write `predictive_embedding_potential.json`.
 - `write_predictive_boundary_corrections_manifest(workdir)`: replace `boundary_corrections.json` with predictive boundary-coupling corrections.
+- `write_predictive_ewf_closure_manifest(workdir)`: write bath-rank and mean-field double-counting diagnostics from returned SIESTA matrices.
 - `summarize_run(workdir)`: build rank/block success, timing, and matrix-size metrics.
 - `write_run_summary_manifest(workdir)`: write those metrics to `run_summary.json`.
 - `compare_weak_scaling_runs(workdirs)`: compare multiple `run_summary.json` files.
@@ -490,9 +494,10 @@ global/local FDF -> block input directories -> SIESTA execution -> output reader
 The validation manifest is deliberately conservative.  It checks block result
 coverage, convergence, required matrix artifacts, core atom ownership, and sparse
 matrix assembly consistency.  Its `total_block_energy_ev` field is only a
-diagnostic sum of independent block energies; it is not reported as an embedded
-total energy because boundary embedding potentials, chemical-potential
-constraints, and double-counting corrections are not implemented yet.
+diagnostic sum of independent block energies.  Embedded observables and
+`predictive_ewf_closure.json` record the current boundary, electron-count, bath,
+and mean-field double-counting policies explicitly; production correlated
+fragment energy reconstruction is still outside this adapter layer.
 
 If any block SIESTA run fails, the driver now writes `validation.json` with
 `ok=false`, keeps the raw rank/result manifests for debugging, skips
