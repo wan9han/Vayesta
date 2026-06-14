@@ -18,6 +18,7 @@ from vayesta.siesta.adapter import (
     SiestaBlockWorkflow,
     add_siesta_block_fragments,
     analyze_block_boundaries,
+    apply_pyscf_ao_mapping_to_contract,
     assemble_global_matrices,
     attach_siesta_results_to_fragments,
     build_boundary_correction_plan,

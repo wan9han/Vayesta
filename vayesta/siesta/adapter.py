@@ -1705,6 +1705,44 @@ def write_pyscf_ao_eri_from_contract(
     return payload
 
 
+def apply_pyscf_ao_mapping_to_contract(
+    contract_path: str | os.PathLike[str],
+    mapping_path: str | os.PathLike[str],
+    output_path: str | os.PathLike[str] | None = None,
+) -> dict:
+    """Inject explicit PySCF AO indices into an AO ERI contract."""
+
+    contract_path = Path(contract_path)
+    mapping_path = Path(mapping_path)
+    output_path = Path(output_path) if output_path is not None else contract_path
+    contract = json.loads(contract_path.read_text())
+    mapping = json.loads(mapping_path.read_text())
+    mapping_by_block = {int(block["block_id"]): block for block in mapping.get("blocks", [])}
+    blockers = list(mapping.get("blockers", []))
+    updated_blocks = []
+    for block in contract.get("blocks", []):
+        updated = dict(block)
+        block_id = int(block["block_id"])
+        mapped = mapping_by_block.get(block_id)
+        if mapped is None:
+            blockers.append(f"Block {block_id} is missing from PySCF AO mapping manifest")
+        else:
+            try:
+                indices = _validated_pyscf_ao_indices_for_contract_block(block, mapped)
+                updated["pyscf_ao_indices"] = indices
+                updated["pyscf_ao_mapping_status"] = mapped.get("mapping_status", "external_mapping_provided")
+                updated["pyscf_ao_mapping_source"] = mapped.get("mapping_source")
+            except Exception as exc:
+                blockers.append(f"Block {block_id} PySCF AO mapping invalid: {exc}")
+        updated_blocks.append(updated)
+    contract["blocks"] = updated_blocks
+    contract["pyscf_ao_mapping_manifest"] = str(mapping_path)
+    contract["pyscf_ao_mapping_ready"] = not blockers and len(mapping_by_block) >= len(updated_blocks)
+    contract["pyscf_ao_mapping_blockers"] = blockers
+    output_path.write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n")
+    return contract
+
+
 def build_cluster_two_electron_integrals_from_ao(
     workdir: str | os.PathLike[str],
     ao_integrals_npz_path: str | os.PathLike[str],
@@ -3259,6 +3297,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     predictive_closure = _read_optional_json(workdir / "predictive_ewf_closure.json") or {}
     clusters = _read_optional_json(workdir / "cluster_hamiltonians.json") or {}
     ao_eri_contract = _read_optional_json(workdir / "ao_eri_contract.json") or {}
+    pyscf_ao_mapping = _read_optional_json(workdir / "pyscf_ao_mapping.json") or {}
     cluster_integrals = _read_optional_json(workdir / "cluster_two_electron_integrals.json") or {}
     cluster_solver = _read_optional_json(workdir / "cluster_solver_results.json") or {}
     effective = _read_optional_json(workdir / "effective_correlated_results.json") or {}
@@ -3303,6 +3342,9 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     predictive_ewf_closure_ready = predictive_closure.get("status") == "ready"
     cluster_hamiltonians_ready = clusters.get("ready") is True
     ao_eri_contract_ready = ao_eri_contract.get("ready") is True
+    pyscf_ao_mapping_ready = (
+        ao_eri_contract.get("pyscf_ao_mapping_ready") is True or pyscf_ao_mapping.get("ready") is True
+    )
     cluster_two_electron_integrals_ready = cluster_integrals.get("ready") is True
     cluster_solver_ready = cluster_solver.get("ready") is True
     effective_correlated_ready = effective.get("ready") is True
@@ -3316,6 +3358,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
         "predictive_ewf_closure_ready": predictive_ewf_closure_ready,
         "cluster_hamiltonians_ready": cluster_hamiltonians_ready,
         "ao_eri_contract_ready": ao_eri_contract_ready,
+        "pyscf_ao_mapping_ready": pyscf_ao_mapping_ready,
         "cluster_two_electron_integrals_ready": cluster_two_electron_integrals_ready,
         "cluster_solver_results_ready": cluster_solver_ready,
         "effective_correlated_results_ready": effective_correlated_ready,
@@ -3368,6 +3411,13 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "ao_eri_contract_num_blocks": ao_eri_contract.get("num_blocks"),
             "ao_eri_contract_num_contract_blocks": ao_eri_contract.get("num_contract_blocks"),
             "ao_eri_contract_requested_energy_unit": ao_eri_contract.get("requested_energy_unit"),
+            "pyscf_ao_mapping_manifest": ao_eri_contract.get(
+                "pyscf_ao_mapping_manifest", str(workdir / "pyscf_ao_mapping.json") if pyscf_ao_mapping else None
+            ),
+            "pyscf_ao_mapping_ready": pyscf_ao_mapping_ready,
+            "pyscf_ao_mapping_blockers": ao_eri_contract.get(
+                "pyscf_ao_mapping_blockers", pyscf_ao_mapping.get("blockers")
+            ),
             "cluster_two_electron_integrals_artifact_level": cluster_integrals.get("artifact_level"),
             "cluster_two_electron_integrals_source": cluster_integrals.get("source"),
             "cluster_two_electron_integrals_source_path": cluster_integrals.get("source_ao_integrals_npz_path"),
@@ -4887,6 +4937,31 @@ def _pyscf_ao_eri_contract_block(mol: object, ao_eri_hartree: np.ndarray, block:
         "ready": True,
         "_ao_eri": block_eri,
     }
+
+
+def _validated_pyscf_ao_indices_for_contract_block(contract_block: dict, mapping_block: dict) -> list[int]:
+    if "pyscf_ao_indices" not in mapping_block:
+        raise ValueError("mapping block is missing pyscf_ao_indices")
+    indices = [int(index) for index in mapping_block["pyscf_ao_indices"]]
+    expected_shape = list(contract_block.get("required_ao_eri_shape", []))
+    if len(expected_shape) != 4 or len(set(expected_shape)) != 1:
+        raise ValueError("contract block has invalid required_ao_eri_shape")
+    if len(indices) != int(expected_shape[0]):
+        raise ValueError(
+            f"pyscf_ao_indices length {len(indices)} does not match required AO dimension {expected_shape[0]}"
+        )
+    if len(set(indices)) != len(indices):
+        raise ValueError("pyscf_ao_indices contain duplicates")
+    if any(index < 0 for index in indices):
+        raise ValueError("pyscf_ao_indices contain negative indices")
+    expected_fingerprint = contract_block.get("ao_ordering_fingerprint")
+    provided_fingerprint = mapping_block.get("ao_ordering_fingerprint")
+    if provided_fingerprint is not None and provided_fingerprint != expected_fingerprint:
+        raise ValueError(
+            "ao_ordering_fingerprint mismatch: "
+            f"mapping {provided_fingerprint}, contract {expected_fingerprint}"
+        )
+    return indices
 
 
 def _pyscf_ao_eri_producer_failure_payload(contract: dict, output_path: Path, reason: str) -> dict:

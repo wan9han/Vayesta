@@ -847,6 +847,8 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
                 "num_blocks": 1,
                 "num_contract_blocks": 1,
                 "requested_energy_unit": "ev",
+                "pyscf_ao_mapping_ready": True,
+                "pyscf_ao_mapping_manifest": str(tmp_path / "pyscf_ao_mapping.json"),
             }
         )
     )
@@ -914,6 +916,7 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
     assert payload["predictive_boundary_potential_ready"] is True
     assert payload["cluster_hamiltonians_ready"] is True
     assert payload["ao_eri_contract_ready"] is True
+    assert payload["pyscf_ao_mapping_ready"] is True
     assert payload["cluster_two_electron_integrals_ready"] is True
     assert payload["cluster_solver_results_ready"] is True
     assert payload["effective_correlated_results_ready"] is True
@@ -928,6 +931,8 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
     assert payload["diagnostic_outputs"]["ao_eri_contract_ready"] is True
     assert payload["diagnostic_outputs"]["ao_eri_contract_num_contract_blocks"] == 1
     assert payload["diagnostic_outputs"]["ao_eri_contract_requested_energy_unit"] == "ev"
+    assert payload["diagnostic_outputs"]["pyscf_ao_mapping_ready"] is True
+    assert payload["diagnostic_outputs"]["pyscf_ao_mapping_manifest"] == str(tmp_path / "pyscf_ao_mapping.json")
     assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_ready"] is True
     assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_num_written_blocks"] == 1
     assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_uses_ab_initio"] is True
@@ -1709,6 +1714,92 @@ def test_pyscf_ao_eri_producer_writes_contract_npz(tmp_path):
     assert arrays["energy_unit"].item() == "hartree"
     assert arrays["ao_eri_block_0000"].shape == (nao, nao, nao, nao)
     assert arrays["ao_ordering_fingerprint_block_0000"].item() == fingerprint
+
+
+def test_pyscf_ao_mapping_manifest_injects_indices_into_contract(tmp_path):
+    contract_path = tmp_path / "ao_eri_contract.json"
+    mapping_path = tmp_path / "pyscf_ao_mapping.json"
+    output_path = tmp_path / "ao_eri_contract.mapped.json"
+    fingerprint = "d" * 64
+    contract_path.write_text(
+        json.dumps(
+            {
+                "num_blocks": 1,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "ao_eri_array_key": "ao_eri_block_0000",
+                        "ao_ordering_fingerprint_key": "ao_ordering_fingerprint_block_0000",
+                        "ao_ordering_fingerprint": fingerprint,
+                        "required_ao_eri_shape": [2, 2, 2, 2],
+                    }
+                ],
+            }
+        )
+    )
+    mapping_path.write_text(
+        json.dumps(
+            {
+                "ready": True,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "pyscf_ao_indices": [1, 0],
+                        "ao_ordering_fingerprint": fingerprint,
+                        "mapping_source": "unit-test",
+                    }
+                ],
+            }
+        )
+    )
+
+    mapped = adapter.apply_pyscf_ao_mapping_to_contract(contract_path, mapping_path, output_path)
+
+    assert mapped["pyscf_ao_mapping_ready"] is True
+    assert mapped["pyscf_ao_mapping_blockers"] == []
+    assert mapped["blocks"][0]["pyscf_ao_indices"] == [1, 0]
+    assert mapped["blocks"][0]["pyscf_ao_mapping_source"] == "unit-test"
+    assert json.loads(output_path.read_text()) == mapped
+
+
+def test_pyscf_ao_mapping_manifest_rejects_fingerprint_mismatch(tmp_path):
+    contract_path = tmp_path / "ao_eri_contract.json"
+    mapping_path = tmp_path / "pyscf_ao_mapping.json"
+    contract_path.write_text(
+        json.dumps(
+            {
+                "num_blocks": 1,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "ao_eri_array_key": "ao_eri_block_0000",
+                        "ao_ordering_fingerprint_key": "ao_ordering_fingerprint_block_0000",
+                        "ao_ordering_fingerprint": "e" * 64,
+                        "required_ao_eri_shape": [2, 2, 2, 2],
+                    }
+                ],
+            }
+        )
+    )
+    mapping_path.write_text(
+        json.dumps(
+            {
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "pyscf_ao_indices": [0, 1],
+                        "ao_ordering_fingerprint": "f" * 64,
+                    }
+                ],
+            }
+        )
+    )
+
+    mapped = adapter.apply_pyscf_ao_mapping_to_contract(contract_path, mapping_path)
+
+    assert mapped["pyscf_ao_mapping_ready"] is False
+    assert "fingerprint mismatch" in mapped["pyscf_ao_mapping_blockers"][0]
+    assert "pyscf_ao_indices" not in mapped["blocks"][0]
 
 
 def test_pyscf_ao_eri_producer_reports_missing_ao_mapping(tmp_path):
