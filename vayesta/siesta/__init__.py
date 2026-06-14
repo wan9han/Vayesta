@@ -64,6 +64,7 @@ from vayesta.siesta.adapter import (
     write_boundary_corrections_manifest,
     write_cluster_hamiltonians_manifest,
     write_cluster_solver_results_manifest,
+    write_cluster_two_electron_integrals_from_ao_manifest,
     write_embedding_contract_manifest,
     write_electron_constraint_manifest,
     write_embedded_observables_manifest,

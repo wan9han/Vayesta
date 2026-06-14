@@ -254,6 +254,12 @@ block artifacts:
 - `cluster_solver_results.json` consumes those NPZ files with a one-electron
   Lowdin reference solver.  This verifies the solver interface but is not a
   correlated EWF solver.
+- `cluster_two_electron_integrals.json` can be generated from an external
+  AO-basis ERI tensor with the same orbital ordering as the SIESTA-returned
+  matrices.  It writes per-block `cluster_two_electron_integrals_block_XXXX.npz`
+  files and updates `cluster_hamiltonians.json` with
+  `two_electron_integrals_npz_path`.  The input NPZ may declare
+  `energy_unit="hartree"` or `"ev"`; output `ovov` couplings are always eV.
 - `effective_correlated_results.json` applies a second-order cluster
   correlation prototype.  By default it uses a configurable Hubbard-like model
   interaction and explicitly records that no ab-initio two-electron integrals
@@ -302,7 +308,8 @@ The public collection helpers are:
 - `write_predictive_ewf_closure_manifest(workdir)`: write bath-rank and mean-field double-counting diagnostics from returned SIESTA matrices.
 - `write_cluster_hamiltonians_manifest(workdir)`: write per-block cluster Hamiltonian NPZ files and `cluster_hamiltonians.json`.
 - `write_cluster_solver_results_manifest(workdir)`: solve the cluster Hamiltonian NPZ files with the one-electron reference solver.
-- `write_effective_correlated_results_manifest(workdir)`: compute the model effective-interaction correlation correction.
+- `write_cluster_two_electron_integrals_from_ao_manifest(workdir, ao_integrals_npz_path, energy_unit=None)`: transform an external AO ERI tensor into per-block cluster eigenbasis `ovov` pair-coupling tensors.
+- `write_effective_correlated_results_manifest(workdir)`: compute the second-order effective-interaction correlation correction, using external `ovov` tensors when present and model U otherwise.
 - `write_effective_interaction_benchmark_scan_manifest(workdir, reference_observables, u_values_ev)`: quantify effective-interaction model response against a reference.
 - `summarize_run(workdir)`: build rank/block success, timing, and matrix-size metrics.
 - `write_run_summary_manifest(workdir)`: write those metrics to `run_summary.json`.

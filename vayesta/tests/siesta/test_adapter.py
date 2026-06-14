@@ -839,6 +839,17 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
             }
         )
     )
+    (tmp_path / "cluster_two_electron_integrals.json").write_text(
+        json.dumps(
+            {
+                "artifact_level": "external-ao-eri-to-cluster-eigenbasis-ovov-v1",
+                "source": "external_ao_eri",
+                "ready": True,
+                "num_written_blocks": 1,
+                "uses_ab_initio_two_electron_integrals": True,
+            }
+        )
+    )
     (tmp_path / "cluster_solver_results.json").write_text(
         json.dumps(
             {
@@ -879,6 +890,7 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
 
     assert payload["predictive_boundary_potential_ready"] is True
     assert payload["cluster_hamiltonians_ready"] is True
+    assert payload["cluster_two_electron_integrals_ready"] is True
     assert payload["cluster_solver_results_ready"] is True
     assert payload["effective_correlated_results_ready"] is True
     assert payload["effective_interaction_benchmark_scan_ready"] is True
@@ -889,6 +901,9 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
     assert payload["diagnostic_outputs"]["predictive_siesta_external_potential_applied"] is False
     assert payload["diagnostic_outputs"]["cluster_hamiltonian_ready"] is True
     assert payload["diagnostic_outputs"]["cluster_hamiltonian_num_written_blocks"] == 1
+    assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_ready"] is True
+    assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_num_written_blocks"] == 1
+    assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_uses_ab_initio"] is True
     assert payload["diagnostic_outputs"]["cluster_solver_ready"] is True
     assert payload["diagnostic_outputs"]["cluster_solver_num_solved_blocks"] == 1
     assert payload["diagnostic_outputs"]["cluster_solver_total_density_projected_one_electron_energy_ev"] == -2.0
@@ -1535,6 +1550,61 @@ def test_effective_interaction_solver_consumes_external_two_electron_integrals(t
     assert block["spin_channels"][0]["pair_terms_sample"][0]["coupling_ev"] == pytest.approx(0.75)
     assert block["correlation_energy_ev"] == pytest.approx(-(0.75**2) / 2.0)
     assert payload["total_correlation_energy_ev"] == pytest.approx(-(0.75**2) / 2.0)
+
+
+def test_cluster_two_electron_integral_transform_feeds_effective_solver(tmp_path):
+    block_dir = tmp_path / "block_0000"
+    block_dir.mkdir()
+    npz_path = block_dir / "cluster_hamiltonian_block_0000.npz"
+    np.savez_compressed(
+        npz_path,
+        basis_coefficients=np.eye(2),
+        lowdin_orthogonalizer=np.eye(2),
+        hamiltonian_orthogonalized=np.asarray([[[1.0, 0.0], [0.0, 3.0]]]),
+        density_orthogonalized=np.asarray([[[2.0, 0.0], [0.0, 0.0]]]),
+        overlap_orthogonalized=np.eye(2),
+    )
+    ao_eri = np.zeros((2, 2, 2, 2))
+    ao_eri[0, 1, 0, 1] = 0.4 / adapter.HARTREE_TO_EV
+    ao_eri_path = tmp_path / "ao_eri.npz"
+    np.savez_compressed(ao_eri_path, ao_eri=ao_eri, energy_unit=np.asarray("hartree"))
+    (tmp_path / "cluster_hamiltonians.json").write_text(
+        json.dumps(
+            {
+                "num_blocks": 1,
+                "ready": True,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "npz_path": str(npz_path),
+                        "cluster_basis_size": 2,
+                        "orthogonalized_basis_size": 2,
+                    }
+                ],
+            }
+        )
+    )
+    (tmp_path / "cluster_solver_results.json").write_text(
+        json.dumps({"solver_level": "one-electron-lowdin-cluster-reference-v1"})
+    )
+
+    tensors = adapter.write_cluster_two_electron_integrals_from_ao_manifest(tmp_path, ao_eri_path)
+    updated_clusters = json.loads((tmp_path / "cluster_hamiltonians.json").read_text())
+    payload = adapter.write_effective_correlated_results_manifest(
+        tmp_path,
+        effective_interaction_u_ev=99.0,
+        denominator_shift_ev=0.0,
+    )
+
+    assert tensors["ready"] is True
+    assert tensors["uses_ab_initio_two_electron_integrals"] is True
+    assert tensors["source_energy_unit"] == "hartree"
+    assert tensors["output_energy_unit"] == "ev"
+    assert tensors["blocks"][0]["ovov_shape"] == [1, 2, 2]
+    assert updated_clusters["blocks"][0]["two_electron_integrals_npz_path"] == tensors["blocks"][0]["npz_path"]
+    assert payload["uses_ab_initio_two_electron_integrals"] is True
+    assert payload["total_correlation_energy_ev"] == pytest.approx(-(0.4**2) / 2.0)
+    assert np.load(tensors["blocks"][0]["npz_path"])["ovov"].tolist() == [[[0.0, 0.4], [0.0, 0.0]]]
 
 
 def test_effective_interaction_benchmark_scan_reports_fit_direction(tmp_path):

@@ -21,6 +21,9 @@ from typing import Iterable, Sequence
 import numpy as np
 
 
+HARTREE_TO_EV = 27.211386245988
+
+
 @dataclasses.dataclass(frozen=True)
 class Atom:
     """One SIESTA coordinate entry with its global atom index."""
@@ -1596,6 +1599,84 @@ def write_cluster_solver_results_manifest(workdir: str | os.PathLike[str]) -> di
     return solve_cluster_hamiltonians(workdir)
 
 
+def build_cluster_two_electron_integrals_from_ao(
+    workdir: str | os.PathLike[str],
+    ao_integrals_npz_path: str | os.PathLike[str],
+    energy_unit: str | None = None,
+) -> dict:
+    """Transform an external AO ERI tensor into block-local cluster eigenbasis couplings.
+
+    The input NPZ must contain ``ao_eri`` with shape ``(nao, nao, nao, nao)``
+    in the same AO ordering as the SIESTA-returned matrices.  The output NPZ
+    files contain an ``ovov`` pair-coupling matrix indexed by full cluster
+    eigen-orbital ids; the effective-interaction solver consumes this as an
+    external ab-initio/effective two-electron source.
+    """
+
+    workdir = Path(workdir)
+    ao_integrals_npz_path = Path(ao_integrals_npz_path)
+    clusters = _read_optional_json(workdir / "cluster_hamiltonians.json") or {}
+    ao_data = np.load(ao_integrals_npz_path)
+    if "ao_eri" not in ao_data:
+        raise ValueError("AO integral NPZ must contain an ao_eri array")
+    ao_eri = np.asarray(ao_data["ao_eri"], dtype=float)
+    source_energy_unit = _normalize_energy_unit(
+        energy_unit if energy_unit is not None else _npz_optional_scalar_string(ao_data, "energy_unit", "ev")
+    )
+    ao_eri_ev = ao_eri * _energy_unit_to_ev_factor(source_energy_unit)
+    if ao_eri.ndim != 4 or len(set(ao_eri.shape)) != 1:
+        raise ValueError("ao_eri must have shape (nao, nao, nao, nao)")
+    blocks = []
+    blockers = []
+    updated_cluster_blocks = []
+    for block in clusters.get("blocks", []):
+        block_copy = dict(block)
+        try:
+            tensor_block = _write_cluster_two_electron_integrals_for_block(
+                block_copy,
+                ao_eri_ev,
+                source_path=ao_integrals_npz_path,
+                source_energy_unit=source_energy_unit,
+            )
+            block_copy["two_electron_integrals_npz_path"] = tensor_block["npz_path"]
+            blocks.append(tensor_block)
+        except Exception as exc:
+            block_id = block.get("block_id", "unknown")
+            blockers.append(f"Block {block_id} two-electron integral transform failed: {exc}")
+        updated_cluster_blocks.append(block_copy)
+    updated_clusters = dict(clusters)
+    updated_clusters["blocks"] = updated_cluster_blocks
+    if updated_cluster_blocks:
+        (workdir / "cluster_hamiltonians.json").write_text(json.dumps(updated_clusters, indent=2, sort_keys=True) + "\n")
+    payload = {
+        "version": 1,
+        "artifact_level": "external-ao-eri-to-cluster-eigenbasis-ovov-v1",
+        "source_ao_integrals_npz_path": str(ao_integrals_npz_path),
+        "source": "external_ao_eri",
+        "source_energy_unit": source_energy_unit,
+        "output_energy_unit": "ev",
+        "uses_reference_energy": False,
+        "uses_ab_initio_two_electron_integrals": not blockers and bool(blocks),
+        "num_blocks": int(clusters.get("num_blocks", len(updated_cluster_blocks))),
+        "num_written_blocks": len(blocks),
+        "ready": len(blocks) == int(clusters.get("num_blocks", len(updated_cluster_blocks))) and not blockers,
+        "blockers": blockers,
+        "blocks": blocks,
+    }
+    (workdir / "cluster_two_electron_integrals.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
+def write_cluster_two_electron_integrals_from_ao_manifest(
+    workdir: str | os.PathLike[str],
+    ao_integrals_npz_path: str | os.PathLike[str],
+    energy_unit: str | None = None,
+) -> dict:
+    """Write cluster two-electron/effective interaction NPZ files from an external AO ERI tensor."""
+
+    return build_cluster_two_electron_integrals_from_ao(workdir, ao_integrals_npz_path, energy_unit=energy_unit)
+
+
 def solve_effective_interaction_clusters(
     workdir: str | os.PathLike[str],
     effective_interaction_u_ev: float = 0.0,
@@ -3004,6 +3085,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     predictive = _read_optional_json(workdir / "predictive_embedding_potential.json") or {}
     predictive_closure = _read_optional_json(workdir / "predictive_ewf_closure.json") or {}
     clusters = _read_optional_json(workdir / "cluster_hamiltonians.json") or {}
+    cluster_integrals = _read_optional_json(workdir / "cluster_two_electron_integrals.json") or {}
     cluster_solver = _read_optional_json(workdir / "cluster_solver_results.json") or {}
     effective = _read_optional_json(workdir / "effective_correlated_results.json") or {}
     effective_scan = _read_optional_json(workdir / "effective_interaction_benchmark_scan.json") or {}
@@ -3046,6 +3128,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     )
     predictive_ewf_closure_ready = predictive_closure.get("status") == "ready"
     cluster_hamiltonians_ready = clusters.get("ready") is True
+    cluster_two_electron_integrals_ready = cluster_integrals.get("ready") is True
     cluster_solver_ready = cluster_solver.get("ready") is True
     effective_correlated_ready = effective.get("ready") is True
     return {
@@ -3057,6 +3140,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
         "predictive_boundary_potential_ready": predictive_potential_ready,
         "predictive_ewf_closure_ready": predictive_ewf_closure_ready,
         "cluster_hamiltonians_ready": cluster_hamiltonians_ready,
+        "cluster_two_electron_integrals_ready": cluster_two_electron_integrals_ready,
         "cluster_solver_results_ready": cluster_solver_ready,
         "effective_correlated_results_ready": effective_correlated_ready,
         "effective_interaction_benchmark_scan_ready": bool(effective_scan),
@@ -3103,6 +3187,13 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "cluster_hamiltonian_artifact_level": clusters.get("artifact_level"),
             "cluster_hamiltonian_num_written_blocks": clusters.get("num_written_blocks"),
             "cluster_hamiltonian_ready": clusters.get("ready"),
+            "cluster_two_electron_integrals_artifact_level": cluster_integrals.get("artifact_level"),
+            "cluster_two_electron_integrals_source": cluster_integrals.get("source"),
+            "cluster_two_electron_integrals_num_written_blocks": cluster_integrals.get("num_written_blocks"),
+            "cluster_two_electron_integrals_ready": cluster_integrals.get("ready"),
+            "cluster_two_electron_integrals_uses_ab_initio": cluster_integrals.get(
+                "uses_ab_initio_two_electron_integrals"
+            ),
             "cluster_solver_level": cluster_solver.get("solver_level"),
             "cluster_solver_kind": cluster_solver.get("solver_kind"),
             "cluster_solver_ready": cluster_solver.get("ready"),
@@ -4458,6 +4549,99 @@ def _solve_effective_interaction_cluster_block(
     }
 
 
+def _write_cluster_two_electron_integrals_for_block(
+    block: dict,
+    ao_eri: np.ndarray,
+    source_path: Path,
+    source_energy_unit: str,
+) -> dict:
+    npz_path = Path(block["npz_path"])
+    arrays = np.load(npz_path)
+    basis_coefficients = np.asarray(arrays["basis_coefficients"], dtype=float)
+    lowdin = np.asarray(arrays["lowdin_orthogonalizer"], dtype=float)
+    h_orth = np.asarray(arrays["hamiltonian_orthogonalized"], dtype=float)
+    if basis_coefficients.ndim != 2:
+        raise ValueError("basis_coefficients must have shape (nao, ncluster)")
+    if lowdin.ndim != 2:
+        raise ValueError("lowdin_orthogonalizer must be a matrix")
+    if h_orth.ndim != 3:
+        raise ValueError("hamiltonian_orthogonalized must have shape (nspin, norb, norb)")
+    nao = int(basis_coefficients.shape[0])
+    if ao_eri.shape != (nao, nao, nao, nao):
+        raise ValueError(f"ao_eri shape {ao_eri.shape} does not match block AO dimension {nao}")
+    block_dir = npz_path.parent
+    block_id = int(block["block_id"])
+    out_path = block_dir / f"cluster_two_electron_integrals_block_{block_id:04d}.npz"
+    c_orth = basis_coefficients @ lowdin
+    ovov_by_spin = []
+    for spin in range(int(h_orth.shape[0])):
+        h_spin = _symmetrize_dense(h_orth[spin])
+        _, eigenvectors = np.linalg.eigh(h_spin)
+        c_eigen = c_orth @ eigenvectors
+        ovov = np.einsum("pi,qa,ri,sa,pqrs->ia", c_eigen, c_eigen, c_eigen, c_eigen, ao_eri, optimize=True)
+        ovov_by_spin.append(ovov)
+    ovov_array = np.asarray(ovov_by_spin)
+    np.savez_compressed(
+        out_path,
+        ovov=ovov_array,
+        format=np.asarray("cluster-eigenbasis-full-pair-ovov-v1"),
+        energy_unit=np.asarray("ev"),
+        source_energy_unit=np.asarray(source_energy_unit),
+        source_ao_integrals_npz_path=np.asarray(str(source_path)),
+        cluster_hamiltonian_npz_path=np.asarray(str(npz_path)),
+    )
+    return {
+        "block_id": block_id,
+        "npz_path": str(out_path),
+        "cluster_hamiltonian_npz_path": str(npz_path),
+        "source_ao_integrals_npz_path": str(source_path),
+        "source_energy_unit": source_energy_unit,
+        "output_energy_unit": "ev",
+        "format": "cluster-eigenbasis-full-pair-ovov-v1",
+        "ao_dimension": nao,
+        "nspin": int(ovov_array.shape[0]),
+        "num_cluster_orbitals": int(ovov_array.shape[1]),
+        "ovov_shape": list(ovov_array.shape),
+        "max_abs_coupling_ev": float(np.max(np.abs(ovov_array))) if ovov_array.size else 0.0,
+        "ready": True,
+    }
+
+
+def _npz_optional_scalar_string(arrays: object, key: str, default: str) -> str:
+    if key not in arrays:
+        return default
+    value = arrays[key]
+    if isinstance(value, np.ndarray):
+        return str(value.item() if value.shape == () else value.tolist())
+    return str(value)
+
+
+def _normalize_energy_unit(unit: str) -> str:
+    normalized = str(unit).strip().lower()
+    aliases = {
+        "ev": "ev",
+        "electronvolt": "ev",
+        "electronvolts": "ev",
+        "ha": "hartree",
+        "hartree": "hartree",
+        "hartrees": "hartree",
+        "au": "hartree",
+        "a.u.": "hartree",
+    }
+    if normalized not in aliases:
+        raise ValueError(f"Unsupported AO integral energy unit: {unit}")
+    return aliases[normalized]
+
+
+def _energy_unit_to_ev_factor(unit: str) -> float:
+    normalized = _normalize_energy_unit(unit)
+    if normalized == "ev":
+        return 1.0
+    if normalized == "hartree":
+        return HARTREE_TO_EV
+    raise ValueError(f"Unsupported AO integral energy unit: {unit}")
+
+
 def _load_cluster_two_electron_integrals(path: str | os.PathLike[str], nspin: int) -> dict:
     arrays = np.load(Path(path))
     if "ovov" not in arrays:
@@ -4465,10 +4649,10 @@ def _load_cluster_two_electron_integrals(path: str | os.PathLike[str], nspin: in
     ovov = np.asarray(arrays["ovov"], dtype=float)
     if ovov.ndim == 2:
         if int(nspin) != 1:
-            raise ValueError("spin-resolved run requires ovov shape (nspin, nocc, nvirt)")
+            raise ValueError("spin-resolved run requires ovov shape (nspin, norb, norb)")
         ovov = ovov.reshape((1, *ovov.shape))
     if ovov.ndim != 3:
-        raise ValueError("ovov array must have shape (nocc, nvirt) or (nspin, nocc, nvirt)")
+        raise ValueError("ovov array must have shape (norb, norb) or (nspin, norb, norb)")
     if ovov.shape[0] not in (1, int(nspin)):
         raise ValueError("ovov spin dimension must be 1 or match the cluster spin dimension")
     return {
