@@ -2202,6 +2202,100 @@ def test_pyscf_external_eri_workflow_propagates_verified_observables(tmp_path):
     assert readiness["diagnostic_outputs"]["effective_ao_ordering_verified"] is True
 
 
+def _build_h2_cluster_data(tmp_path):
+    """Build H2/sto-3g cluster data for production solver tests.
+
+    Returns (tmp_path, nao, ref_mp2_e_corr, ref_ccsd_e_corr).
+    """
+    import pyscf.gto
+    import pyscf.scf
+    import pyscf.mp
+    import pyscf.cc
+
+    mol = pyscf.gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g", verbose=0)
+    mf = pyscf.scf.RHF(mol)
+    mf.kernel()
+    nao = mol.nao_nr()
+
+    ref_mp2 = pyscf.mp.MP2(mf)
+    ref_mp2.kernel()
+    ref_ccsd = pyscf.cc.CCSD(mf)
+    ref_ccsd.kernel()
+
+    fock_ao = mf.get_fock()
+    h_cluster = fock_ao
+    s_cluster = mf.get_ovlp()
+
+    eigvals, eigvecs = np.linalg.eigh(s_cluster)
+    active = eigvals > 1e-12
+    lowdin = eigvecs[:, active] @ np.diag(1.0 / np.sqrt(eigvals[active]))
+    h_orth_spin = adapter._symmetrize_dense(lowdin.T @ h_cluster @ lowdin)
+
+    c_occ = mf.mo_coeff[:, : mol.nelectron // 2]
+    d_ao = 2.0 * c_occ @ c_occ.T
+    d_orth_spin = adapter._symmetrize_dense(lowdin.T @ s_cluster @ d_ao @ s_cluster @ lowdin)
+
+    basis = np.eye(nao)
+    block_dir = tmp_path / "block_0000"
+    block_dir.mkdir()
+    npz_path = block_dir / "cluster_hamiltonian_block_0000.npz"
+    np.savez_compressed(
+        npz_path,
+        basis_coefficients=basis,
+        lowdin_orthogonalizer=lowdin,
+        hamiltonian_orthogonalized=np.asarray([h_orth_spin]),
+        density_orthogonalized=np.asarray([d_orth_spin]),
+        overlap_orthogonalized=np.eye(int(active.sum())),
+        overlap_cluster=s_cluster,
+        hamiltonian_cluster=np.asarray([h_cluster]),
+    )
+
+    (tmp_path / "cluster_hamiltonians.json").write_text(
+        json.dumps(
+            {
+                "num_blocks": 1,
+                "ready": True,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "npz_path": str(npz_path),
+                        "cluster_basis_size": int(nao),
+                        "orthogonalized_basis_size": int(active.sum()),
+                    }
+                ],
+            }
+        )
+    )
+
+    ao_eri = mol.intor("int2e")
+    np.savez_compressed(tmp_path / "pyscf_ao_eri.npz", ao_eri=ao_eri)
+    (tmp_path / "pyscf_ao_eri.manifest.json").write_text(
+        json.dumps({"ready": True, "ao_ordering_verified": True, "num_blocks": 1, "ao_eri_key": "ao_eri"})
+    )
+
+    return ref_mp2.e_corr, ref_ccsd.e_corr
+
+
+def test_production_solver_mp2_on_h2(tmp_path):
+    """MP2 production solver matches PySCF reference for H2/sto-3g."""
+    ref_mp2, _ = _build_h2_cluster_data(tmp_path)
+    result = adapter.solve_production_correlated_clusters(tmp_path, solver_type="mp2")
+    assert result["ready"], f"MP2 not ready: {result.get('blockers')}"
+    assert result["solver_kind"] == "ab_initio_mp2"
+    e_corr = result["blocks"][0]["correlation_energy_hartree"]
+    assert e_corr == pytest.approx(ref_mp2, abs=1e-10)
+
+
+def test_production_solver_ccsd_on_h2(tmp_path):
+    """CCSD production solver matches PySCF reference for H2/sto-3g."""
+    _, ref_ccsd = _build_h2_cluster_data(tmp_path)
+    result = adapter.solve_production_correlated_clusters(tmp_path, solver_type="ccsd")
+    assert result["ready"], f"CCSD not ready: {result.get('blockers')}"
+    assert result["solver_kind"] == "ab_initio_ccsd"
+    e_corr = result["blocks"][0]["correlation_energy_hartree"]
+    assert e_corr == pytest.approx(ref_ccsd, abs=1e-7)
+
+
 def test_cluster_two_electron_integral_transform_feeds_effective_solver(tmp_path):
     block_dir = tmp_path / "block_0000"
     block_dir.mkdir()

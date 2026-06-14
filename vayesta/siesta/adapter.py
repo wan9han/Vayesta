@@ -1880,6 +1880,7 @@ def run_pyscf_external_eri_workflow(
     energy_unit: str = "hartree",
     effective_interaction_u_ev: float = 0.0,
     denominator_shift_ev: float = 1.0e-6,
+    production_solver: str = "mp2",
 ) -> dict:
     """Run the explicit PySCF AO ERI path and write a workflow manifest.
 
@@ -1975,7 +1976,7 @@ def run_pyscf_external_eri_workflow(
         )
         
         # New production solver override
-        production_solver = solve_production_correlated_clusters(workdir, solver_type="mp2")
+        production_solver = solve_production_correlated_clusters(workdir, solver_type=production_solver)
         if production_solver.get("ready"):
             effective = production_solver
             # Since the structure is slightly different, ensure ao_ordering_verified is passed through
@@ -6556,22 +6557,65 @@ def _path_to_str(path: Path | None) -> str | None:
 def _str_to_path(path: str | None) -> Path | None:
     return None if path is None else Path(path)
 
+def _compute_cluster_mp2_correlation_direct(
+    ao_eri: np.ndarray,
+    c_eigen: np.ndarray,
+    mo_energies: np.ndarray,
+    electron_count: float,
+) -> float:
+    """Closed-shell spin-restricted MP2 correlation energy (chemist notation).
+
+    E_corr = sum_{ijab} (ia|jb) * (2*(ia|jb) - (ib|ja)) / (e_i + e_j - e_a - e_b)
+
+    Computed directly from the AO ERI tensor and cluster MO coefficients without
+    fabricating PySCF molecule or SCF objects.
+    """
+    from pyscf import ao2mo
+
+    nao = ao_eri.shape[0]
+    nmo = c_eigen.shape[1]
+    nocc = int(round(electron_count)) // 2
+    nvir = nmo - nocc
+    if nocc <= 0 or nvir <= 0:
+        return 0.0
+
+    mo_eri_2d = ao2mo.incore.full(ao_eri.reshape(nao * nao, nao * nao), c_eigen)
+    mo_eri_4d = ao2mo.restore(1, mo_eri_2d, nmo)
+    eri_ovov = mo_eri_4d[:nocc, nocc:, :nocc, nocc:]
+
+    e_occ = mo_energies[:nocc]
+    e_vir = mo_energies[nocc:]
+    denom = (
+        e_occ[:, None, None, None]
+        + e_occ[None, None, :, None]
+        - e_vir[None, :, None, None]
+        - e_vir[None, None, None, :]
+    )
+    eri_ovov_swapped = eri_ovov.transpose(0, 3, 2, 1)
+    return float(np.sum(eri_ovov * (2.0 * eri_ovov - eri_ovov_swapped) / denom))
+
+
 def solve_production_correlated_clusters(
     workdir: str | os.PathLike[str],
     solver_type: str = "mp2",
 ) -> dict:
-    """Run a production Vayesta/PySCF correlated solver (e.g. MP2 or CCSD) on clusters."""
-    import pyscf
-    from pyscf import gto, scf, cc, mp, ao2mo
+    """Run a production correlated solver (MP2 or CCSD) on cluster blocks.
+
+    MP2 is computed directly from the AO ERI and cluster Hamiltonians without
+    fabricating PySCF molecule/SCF objects.  CCSD uses PySCF's CCSD kernel with
+    a properly constructed mean-field proxy.
+    """
+    from pyscf import gto, scf, cc
+
     workdir = Path(workdir)
     clusters = _read_optional_json(workdir / "cluster_hamiltonians.json") or {}
-    
+
     ao_eri_manifest = _read_optional_json(workdir / "pyscf_ao_eri.manifest.json")
     if not ao_eri_manifest:
         return {"ready": False, "blockers": ["No AO ERI manifest found"]}
-        
+
     ao_eri_data = np.load(workdir / "pyscf_ao_eri.npz")
-    
+
     blocks = []
     blockers = []
     for block in clusters.get("blocks", []):
@@ -6583,73 +6627,119 @@ def solve_production_correlated_clusters(
             d_orth = np.asarray(arrays["density_orthogonalized"], dtype=float)
             basis_coefficients = np.asarray(arrays["basis_coefficients"], dtype=float)
             lowdin = np.asarray(arrays["lowdin_orthogonalizer"], dtype=float)
-            
+
             c_orth = basis_coefficients @ lowdin
             h_spin = _symmetrize_dense(h_orth[0])
             eigenvalues, eigenvectors = np.linalg.eigh(h_spin)
             c_eigen = c_orth @ eigenvectors
-            
+
             if h_orth.shape[0] == 1:
                 electron_count = float(np.trace(d_orth[0]))
             else:
                 electron_count = float(np.trace(d_orth[0]) + np.trace(d_orth[1]))
-            
+
             ao_key = f"ao_eri_block_{block_id:04d}"
             if ao_key in ao_eri_data:
-                ao_eri = ao_eri_data[ao_key]
+                ao_eri = np.asarray(ao_eri_data[ao_key], dtype=float)
             else:
-                ao_eri = ao_eri_data["ao_eri"]
-                
-            nao = ao_eri.shape[0]
+                ao_eri = np.asarray(ao_eri_data["ao_eri"], dtype=float)
+
             nmo = c_eigen.shape[1]
-            
-            mo_eri = pyscf.ao2mo.incore.full(ao_eri.reshape(nao*nao, nao*nao), c_eigen)
-            mo_eri_8 = pyscf.ao2mo.restore(8, mo_eri, nmo)
-            
-            mol = gto.M()
-            mol.nelectron = int(round(electron_count))
-            mol.incore_anyway = True
-            
-            mf = scf.RHF(mol)
-            mf.get_hcore = lambda *args: h_spin
-            mf.get_ovlp = lambda *args: np.eye(nmo)
-            mf.mo_coeff = np.eye(nmo)
-            mf.mo_energy = eigenvalues
-            occ = np.zeros(nmo)
-            nocc = mol.nelectron // 2
-            occ[:nocc] = 2.0
-            mf.mo_occ = occ
-            mf._eri = mo_eri_8
-            
+
             if solver_type.lower() == "mp2":
-                mysolver = mp.MP2(mf)
+                e_corr = _compute_cluster_mp2_correlation_direct(
+                    ao_eri, c_eigen, eigenvalues, electron_count
+                )
             elif solver_type.lower() == "ccsd":
-                mysolver = cc.CCSD(mf)
+                h_cluster_raw = np.asarray(arrays["hamiltonian_cluster"], dtype=float)
+                s_cluster_raw = np.asarray(arrays["overlap_cluster"], dtype=float)
+                h_cluster = _symmetrize_dense(
+                    h_cluster_raw[0] if h_cluster_raw.ndim == 3 else h_cluster_raw
+                )
+                s_cluster = _symmetrize_dense(s_cluster_raw)
+                e_corr = _compute_cluster_ccsd_correlation(
+                    ao_eri,
+                    c_eigen,
+                    eigenvalues,
+                    electron_count,
+                    nmo,
+                    h_cluster,
+                    s_cluster,
+                )
             else:
                 raise ValueError(f"Unknown solver {solver_type}")
-                
-            mysolver.kernel()
-            e_corr = mysolver.e_corr
-            
-            blocks.append({
-                "block_id": block_id,
-                "correlation_energy_ev": float(e_corr) * 27.211386245988,
-            })
+
+            blocks.append(
+                {
+                    "block_id": block_id,
+                    "correlation_energy_ev": float(e_corr) * 27.211386245988,
+                    "correlation_energy_hartree": float(e_corr),
+                }
+            )
         except Exception as exc:
-            blockers.append(f"Block {block.get('block_id')} production solver failed: {exc}")
-            
+            blockers.append(
+                f"Block {block.get('block_id')} production solver failed: {exc}"
+            )
+
+    total_ev = (
+        sum(b["correlation_energy_ev"] for b in blocks) if not blockers else None
+    )
     payload = {
         "version": 1,
-        "solver_level": f"production-{solver_type}-v1",
+        "solver_level": f"production-{solver_type}-v2",
         "solver_kind": f"ab_initio_{solver_type}",
         "uses_ab_initio_two_electron_integrals": True,
         "ao_ordering_verified": True,
-        "total_correlation_energy_ev": sum(b["correlation_energy_ev"] for b in blocks) if not blockers else None,
+        "total_correlation_energy_ev": total_ev,
         "num_solved_blocks": len(blocks),
         "ready": len(blockers) == 0,
         "blockers": blockers,
         "blocks": blocks,
     }
-    
-    (workdir / "effective_correlated_results.json").write_text(json.dumps(payload, indent=2) + "\n")
+
+    (workdir / "effective_correlated_results.json").write_text(
+        json.dumps(payload, indent=2) + "\n"
+    )
     return payload
+
+
+def _compute_cluster_ccsd_correlation(
+    ao_eri: np.ndarray,
+    c_eigen: np.ndarray,
+    mo_energies: np.ndarray,
+    electron_count: float,
+    nmo: int,
+    h_cluster: np.ndarray,
+    s_cluster: np.ndarray,
+) -> float:
+    """CCSD correlation energy using PySCF's CCSD kernel on a proxy molecule.
+
+    Uses AO-basis ERIs with the real MO coefficients so CCSD's internal
+    AO→MO transform works correctly.  The Fock matrix in the AO basis is
+    constructed to be diagonal in the MO basis, matching mo_energies.
+    """
+    from pyscf import gto, scf, cc
+
+    fock_ao = s_cluster @ c_eigen @ np.diag(mo_energies) @ c_eigen.T @ s_cluster
+    veff_ao = fock_ao - h_cluster
+
+    mol = gto.M()
+    mol.nelectron = int(round(electron_count))
+    mol.incore_anyway = True
+    mol.verbose = 0
+
+    mf = scf.RHF(mol)
+    mf.get_hcore = lambda *args: h_cluster
+    mf.get_ovlp = lambda *args: s_cluster
+    mf.get_veff = lambda *args, dm=None, **kwargs: veff_ao
+    mf.mo_coeff = c_eigen
+    mf.mo_energy = mo_energies
+    nocc = mol.nelectron // 2
+    occ = np.zeros(nmo)
+    occ[:nocc] = 2.0
+    mf.mo_occ = occ
+    mf._eri = ao_eri
+
+    mysolver = cc.CCSD(mf)
+    mysolver.kernel()
+    return float(mysolver.e_corr)
