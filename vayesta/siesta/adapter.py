@@ -1672,6 +1672,119 @@ def write_effective_correlated_results_manifest(
     )
 
 
+def build_effective_interaction_benchmark_scan(
+    workdir: str | os.PathLike[str],
+    reference_observables: dict,
+    u_values_ev: Sequence[float],
+    denominator_shift_ev: float = 1.0e-6,
+) -> dict:
+    """Scan model effective-interaction U values against a reference observable."""
+
+    workdir = Path(workdir)
+    if not u_values_ev:
+        raise ValueError("At least one U value is required")
+    embedded = _read_optional_json(workdir / "embedded_observables.json") or {}
+    baseline_energy = embedded.get("embedded_total_energy_ev")
+    reference_energy = reference_observables.get("total_energy_ev")
+    if baseline_energy is None:
+        raise ValueError("embedded_observables.json has no embedded_total_energy_ev")
+    if reference_energy is None:
+        raise ValueError("reference observables have no total_energy_ev")
+    blocks = (_read_optional_json(workdir / "cluster_hamiltonians.json") or {}).get("blocks", [])
+    samples = []
+    for u_value in u_values_ev:
+        block_results = [
+            _solve_effective_interaction_cluster_block(
+                block,
+                effective_interaction_u_ev=float(u_value),
+                denominator_shift_ev=float(denominator_shift_ev),
+            )
+            for block in blocks
+        ]
+        correlation = float(sum(block["correlation_energy_ev"] for block in block_results))
+        total = float(baseline_energy) + correlation
+        error = total - float(reference_energy)
+        samples.append(
+            {
+                "effective_interaction_u_ev": float(u_value),
+                "total_correlation_energy_ev": correlation,
+                "effective_embedded_total_energy_ev": total,
+                "energy_error_ev": error,
+                "abs_energy_error_ev": abs(error),
+            }
+        )
+    best = min(samples, key=lambda item: item["abs_energy_error_ev"])
+    unit_correlation = None
+    try:
+        unit_blocks = [
+            _solve_effective_interaction_cluster_block(
+                block,
+                effective_interaction_u_ev=1.0,
+                denominator_shift_ev=float(denominator_shift_ev),
+            )
+            for block in blocks
+        ]
+        unit_correlation = float(sum(block["correlation_energy_ev"] for block in unit_blocks))
+    except Exception:
+        unit_correlation = None
+    required_correlation = float(reference_energy) - float(baseline_energy)
+    fit_u = None
+    fit_possible = False
+    fit_reason = None
+    if unit_correlation in (None, 0.0):
+        fit_reason = "unit-U correlation is zero or unavailable"
+    else:
+        ratio = required_correlation / unit_correlation
+        if ratio >= 0.0:
+            fit_u = float(math.sqrt(ratio))
+            fit_possible = True
+            fit_reason = "real nonnegative U can match the reference energy in this quadratic model"
+        else:
+            fit_reason = "required correction has opposite sign from the U^2 effective-interaction model"
+    return {
+        "version": 1,
+        "benchmark_level": "effective_interaction_u_scan_vs_reference",
+        "reference_label": reference_observables.get("label", "reference"),
+        "reference_kind": reference_observables.get("reference_kind", "external_reference"),
+        "reference_is_external": bool(reference_observables.get("reference_is_external", True)),
+        "uses_ab_initio_two_electron_integrals": False,
+        "baseline_embedded_total_energy_ev": float(baseline_energy),
+        "reference_total_energy_ev": float(reference_energy),
+        "baseline_energy_error_ev": float(baseline_energy) - float(reference_energy),
+        "denominator_shift_ev": float(denominator_shift_ev),
+        "num_samples": len(samples),
+        "samples": samples,
+        "best_sample": best,
+        "unit_u_total_correlation_energy_ev": unit_correlation,
+        "reference_required_correlation_energy_ev": required_correlation,
+        "reference_fit_possible_with_real_nonnegative_u": fit_possible,
+        "reference_fit_u_ev": fit_u,
+        "reference_fit_reason": fit_reason,
+        "status": "scan_complete",
+    }
+
+
+def write_effective_interaction_benchmark_scan_manifest(
+    workdir: str | os.PathLike[str],
+    reference_observables: dict,
+    u_values_ev: Sequence[float],
+    denominator_shift_ev: float = 1.0e-6,
+) -> dict:
+    """Write `effective_interaction_benchmark_scan.json`."""
+
+    workdir = Path(workdir)
+    payload = build_effective_interaction_benchmark_scan(
+        workdir,
+        reference_observables,
+        u_values_ev=u_values_ev,
+        denominator_shift_ev=denominator_shift_ev,
+    )
+    (workdir / "effective_interaction_benchmark_scan.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    )
+    return payload
+
+
 def write_siesta_embedding_potential_inputs(workdir: str | os.PathLike[str]) -> dict:
     """Write block-local SIESTA embedding potential files and FDF hooks."""
 
@@ -2875,6 +2988,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     clusters = _read_optional_json(workdir / "cluster_hamiltonians.json") or {}
     cluster_solver = _read_optional_json(workdir / "cluster_solver_results.json") or {}
     effective = _read_optional_json(workdir / "effective_correlated_results.json") or {}
+    effective_scan = _read_optional_json(workdir / "effective_interaction_benchmark_scan.json") or {}
 
     backend_ready = bool(validation.get("ok"))
     blockers = []
@@ -2927,6 +3041,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
         "cluster_hamiltonians_ready": cluster_hamiltonians_ready,
         "cluster_solver_results_ready": cluster_solver_ready,
         "effective_correlated_results_ready": effective_correlated_ready,
+        "effective_interaction_benchmark_scan_ready": bool(effective_scan),
         "production_predictive_physics_ready": bool(predictive_closure.get("production_predictive_physics_ready")),
         "benchmark_manifest_ready": benchmark_manifest_ready,
         "reference_benchmark_ready": reference_benchmark_ready,
@@ -2989,6 +3104,17 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "effective_uses_ab_initio_two_electron_integrals": effective.get(
                 "uses_ab_initio_two_electron_integrals"
             ),
+            "effective_interaction_scan_status": effective_scan.get("status"),
+            "effective_interaction_scan_best_u_ev": (effective_scan.get("best_sample") or {}).get(
+                "effective_interaction_u_ev"
+            ),
+            "effective_interaction_scan_best_energy_error_ev": (effective_scan.get("best_sample") or {}).get(
+                "energy_error_ev"
+            ),
+            "effective_interaction_reference_fit_possible": effective_scan.get(
+                "reference_fit_possible_with_real_nonnegative_u"
+            ),
+            "effective_interaction_reference_fit_reason": effective_scan.get("reference_fit_reason"),
             "embedded_total_energy_ev": observables.get("embedded_total_energy_ev"),
             "benchmark_ok": benchmark.get("ok"),
             "benchmark_status": benchmark.get("status"),
