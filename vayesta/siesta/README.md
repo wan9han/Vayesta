@@ -258,6 +258,9 @@ block artifacts:
   effective interaction to the cluster eigenbasis.  It produces a model
   correlation correction while explicitly recording that no ab-initio
   two-electron integrals are used.
+- `effective_interaction_benchmark_scan.json` scans effective-interaction
+  strengths against a reference observable and records whether a real
+  nonnegative model U can improve or fit the reference energy.
 
 When these files are present and validation passes, `physical_readiness.json`
 reports `embedded_observable_ready`.  This is a minimal embedding closure, not a
@@ -297,6 +300,7 @@ The public collection helpers are:
 - `write_cluster_hamiltonians_manifest(workdir)`: write per-block cluster Hamiltonian NPZ files and `cluster_hamiltonians.json`.
 - `write_cluster_solver_results_manifest(workdir)`: solve the cluster Hamiltonian NPZ files with the one-electron reference solver.
 - `write_effective_correlated_results_manifest(workdir)`: compute the model effective-interaction correlation correction.
+- `write_effective_interaction_benchmark_scan_manifest(workdir, reference_observables, u_values_ev)`: quantify effective-interaction model response against a reference.
 - `summarize_run(workdir)`: build rank/block success, timing, and matrix-size metrics.
 - `write_run_summary_manifest(workdir)`: write those metrics to `run_summary.json`.
 - `compare_weak_scaling_runs(workdirs)`: compare multiple `run_summary.json` files.
