@@ -254,9 +254,18 @@ block artifacts:
 - `cluster_solver_results.json` consumes those NPZ files with a one-electron
   Lowdin reference solver.  This verifies the solver interface but is not a
   correlated EWF solver.
+- `siesta_ao_ordering.json` parses each block `ORB_INDX` into structured AO
+  records: block-local orbital index, local/global atom index, species label,
+  `n/l/m/zeta`, polarization flag, symbolic orbital name, cutoff radius, and a
+  stable label/fingerprint.  This is the handoff point for an external
+  SIESTA-to-PySCF AO mapping generator.
 - `ao_eri_contract.json` tells an external ERI producer exactly which
   `ao_eri_block_XXXX` arrays to provide, their required block-local AO shapes,
   and the `ao_ordering_fingerprint_block_XXXX` values that will be verified.
+  When `siesta_ao_ordering.json` is present, each contract block also embeds
+  `siesta_ao_records` and the corresponding AO-ordering fingerprint, so the
+  producer can construct a mapping from actual AO identities rather than only
+  from array dimensions.
   `write_pyscf_ao_eri_from_contract()` is a small PySCF `int2e` contract
   producer for smoke tests and mapped small systems; each contract block must
   provide explicit `pyscf_ao_indices`, because SIESTA-to-PySCF AO ordering
@@ -334,6 +343,7 @@ The public collection helpers are:
 - `write_predictive_ewf_closure_manifest(workdir)`: write bath-rank and mean-field double-counting diagnostics from returned SIESTA matrices.
 - `write_cluster_hamiltonians_manifest(workdir)`: write per-block cluster Hamiltonian NPZ files and `cluster_hamiltonians.json`.
 - `write_cluster_solver_results_manifest(workdir)`: solve the cluster Hamiltonian NPZ files with the one-electron reference solver.
+- `write_siesta_ao_ordering_manifest(workdir)`: parse block `ORB_INDX` files into structured AO labels and fingerprints.
 - `write_ao_eri_contract_manifest(workdir, energy_unit="ev")`: write the per-block AO ERI producer contract and expected ordering fingerprints.
 - `apply_pyscf_ao_mapping_to_contract(contract_path, mapping_path, output_path=None)`: validate and inject explicit PySCF AO indices into the contract.
 - `write_pyscf_ao_eri_from_contract(mol, contract_path, output_path)`: write a PySCF `int2e` AO ERI NPZ following the contract when explicit `pyscf_ao_indices` are supplied.

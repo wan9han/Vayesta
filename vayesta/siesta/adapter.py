@@ -465,6 +465,7 @@ class SiestaBlockWorkflow:
             "validation": None,
             "ewf_results": None,
             "global_matrices": None,
+            "siesta_ao_ordering": None,
             "electron_constraint": None,
             "embedded_observables": None,
             "physical_readiness": None,
@@ -485,6 +486,7 @@ class SiestaBlockWorkflow:
         if validation["ok"]:
             payload["ewf_results"] = write_ewf_results_manifest(self.config.workdir)
             payload["global_matrices"] = write_global_matrices_manifest(self.config.workdir, natoms=self.natoms)
+            payload["siesta_ao_ordering"] = write_siesta_ao_ordering_manifest(self.config.workdir)
             payload["matrix_shape_report"] = write_matrix_shape_report_manifest(self.config.workdir)
             payload["electron_constraint"] = write_electron_constraint_manifest(
                 self.config.workdir,
@@ -1609,16 +1611,79 @@ def write_cluster_solver_results_manifest(workdir: str | os.PathLike[str]) -> di
     return solve_cluster_hamiltonians(workdir)
 
 
+def build_siesta_ao_ordering(workdir: str | os.PathLike[str]) -> dict:
+    """Build a manifest of block-local SIESTA AO labels parsed from ORB_INDX."""
+
+    workdir = Path(workdir)
+    blocks_manifest = _read_optional_json(workdir / "blocks.json") or []
+    results_manifest = _read_optional_json(workdir / "results.json") or []
+    blocks_by_id = {int(block["block_id"]): block for block in blocks_manifest if "block_id" in block}
+    ordering_blocks = []
+    blockers = []
+    for result in results_manifest:
+        block_id = int(result.get("block_id", len(ordering_blocks)))
+        path = _str_to_path(result.get("orbital_index_path"))
+        block = blocks_by_id.get(block_id, {})
+        try:
+            records = read_orbital_index_records(
+                path,
+                local_to_global_atom_index=block.get("local_to_global_atom_index", []),
+            )
+            if not records:
+                raise ValueError("ORB_INDX contains no parsed orbital records")
+            ordering_blocks.append(
+                {
+                    "block_id": block_id,
+                    "orbital_index_path": str(path),
+                    "ao_ordering_scope": "block_local_siesta_orbital_order",
+                    "ao_ordering_fingerprint": _ao_records_fingerprint(records),
+                    "num_orbitals": len(records),
+                    "local_to_global_atom_index": list(block.get("local_to_global_atom_index", [])),
+                    "records": records,
+                    "ready": True,
+                }
+            )
+        except Exception as exc:
+            blockers.append(f"Block {block_id} SIESTA AO ordering parse failed: {exc}")
+    return {
+        "version": 1,
+        "artifact_level": "siesta-orbital-index-ao-ordering-v1",
+        "ao_ordering_scope": "block_local_siesta_orbital_order",
+        "num_blocks": len(results_manifest),
+        "num_written_blocks": len(ordering_blocks),
+        "ready": len(ordering_blocks) == len(results_manifest) and not blockers,
+        "blockers": blockers,
+        "blocks": ordering_blocks,
+    }
+
+
+def write_siesta_ao_ordering_manifest(workdir: str | os.PathLike[str]) -> dict:
+    """Write `siesta_ao_ordering.json` from block ORB_INDX files."""
+
+    workdir = Path(workdir)
+    payload = build_siesta_ao_ordering(workdir)
+    (workdir / "siesta_ao_ordering.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
 def build_ao_eri_contract(workdir: str | os.PathLike[str], energy_unit: str = "ev") -> dict:
     """Build a machine-readable contract for external block-local AO ERI producers."""
 
     workdir = Path(workdir)
     clusters = _read_optional_json(workdir / "cluster_hamiltonians.json") or {}
+    ao_ordering = _read_optional_json(workdir / "siesta_ao_ordering.json") or {}
+    ao_ordering_by_id = {int(block["block_id"]): block for block in ao_ordering.get("blocks", [])}
     blocks = []
     blockers = []
     for block in clusters.get("blocks", []):
         try:
-            blocks.append(_build_ao_eri_contract_block(block, energy_unit=energy_unit))
+            blocks.append(
+                _build_ao_eri_contract_block(
+                    block,
+                    energy_unit=energy_unit,
+                    ao_ordering_block=ao_ordering_by_id.get(int(block["block_id"])),
+                )
+            )
         except Exception as exc:
             block_id = block.get("block_id", "unknown")
             blockers.append(f"Block {block_id} AO ERI contract failed: {exc}")
@@ -1626,6 +1691,7 @@ def build_ao_eri_contract(workdir: str | os.PathLike[str], energy_unit: str = "e
         "version": 1,
         "contract_level": "external-ao-eri-producer-contract-v1",
         "source_cluster_hamiltonians": str(workdir / "cluster_hamiltonians.json"),
+        "source_siesta_ao_ordering": str(workdir / "siesta_ao_ordering.json") if ao_ordering else None,
         "required_npz_arrays": ["energy_unit"],
         "accepted_energy_units": ["ev", "hartree"],
         "requested_energy_unit": _normalize_energy_unit(energy_unit),
@@ -3439,6 +3505,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     predictive = _read_optional_json(workdir / "predictive_embedding_potential.json") or {}
     predictive_closure = _read_optional_json(workdir / "predictive_ewf_closure.json") or {}
     clusters = _read_optional_json(workdir / "cluster_hamiltonians.json") or {}
+    siesta_ao_ordering = _read_optional_json(workdir / "siesta_ao_ordering.json") or {}
     ao_eri_contract = _read_optional_json(workdir / "ao_eri_contract.json") or {}
     pyscf_ao_mapping = _read_optional_json(workdir / "pyscf_ao_mapping.json") or {}
     pyscf_external_eri_workflow = _read_optional_json(workdir / "pyscf_external_eri_workflow.json") or {}
@@ -3485,6 +3552,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     )
     predictive_ewf_closure_ready = predictive_closure.get("status") == "ready"
     cluster_hamiltonians_ready = clusters.get("ready") is True
+    siesta_ao_ordering_ready = siesta_ao_ordering.get("ready") is True
     ao_eri_contract_ready = ao_eri_contract.get("ready") is True
     pyscf_ao_mapping_ready = (
         ao_eri_contract.get("pyscf_ao_mapping_ready") is True or pyscf_ao_mapping.get("ready") is True
@@ -3502,6 +3570,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
         "predictive_boundary_potential_ready": predictive_potential_ready,
         "predictive_ewf_closure_ready": predictive_ewf_closure_ready,
         "cluster_hamiltonians_ready": cluster_hamiltonians_ready,
+        "siesta_ao_ordering_ready": siesta_ao_ordering_ready,
         "ao_eri_contract_ready": ao_eri_contract_ready,
         "pyscf_ao_mapping_ready": pyscf_ao_mapping_ready,
         "pyscf_external_eri_workflow_ready": pyscf_external_eri_workflow_ready,
@@ -3552,6 +3621,10 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "cluster_hamiltonian_artifact_level": clusters.get("artifact_level"),
             "cluster_hamiltonian_num_written_blocks": clusters.get("num_written_blocks"),
             "cluster_hamiltonian_ready": clusters.get("ready"),
+            "siesta_ao_ordering_level": siesta_ao_ordering.get("artifact_level"),
+            "siesta_ao_ordering_ready": siesta_ao_ordering_ready,
+            "siesta_ao_ordering_num_written_blocks": siesta_ao_ordering.get("num_written_blocks"),
+            "siesta_ao_ordering_blockers": siesta_ao_ordering.get("blockers"),
             "ao_eri_contract_level": ao_eri_contract.get("contract_level"),
             "ao_eri_contract_ready": ao_eri_contract.get("ready"),
             "ao_eri_contract_num_blocks": ao_eri_contract.get("num_blocks"),
@@ -4634,6 +4707,7 @@ def _write_cluster_hamiltonian_for_block(
         "npz_path": str(npz_path),
         "source_hamiltonian_matrix_path": str(hsx_path),
         "source_density_matrix_path": str(dm_path),
+        "source_orbital_index_path": result.get("orbital_index_path"),
         "basis_model": "core-ao-plus-boundary-density-svd-bath",
         "orthogonalization": "lowdin",
         "nspin": int(hsx.metadata.nspin),
@@ -5031,7 +5105,11 @@ def _write_cluster_two_electron_integrals_for_block(
     }
 
 
-def _build_ao_eri_contract_block(block: dict, energy_unit: str) -> dict:
+def _build_ao_eri_contract_block(
+    block: dict,
+    energy_unit: str,
+    ao_ordering_block: dict | None = None,
+) -> dict:
     npz_path = Path(block["npz_path"])
     arrays = np.load(npz_path)
     basis_coefficients = np.asarray(arrays["basis_coefficients"], dtype=float)
@@ -5040,7 +5118,7 @@ def _build_ao_eri_contract_block(block: dict, energy_unit: str) -> dict:
     nao = int(basis_coefficients.shape[0])
     block_id = int(block["block_id"])
     fingerprint = _block_ao_ordering_fingerprint(block, nao)
-    return {
+    payload = {
         "block_id": block_id,
         "cluster_hamiltonian_npz_path": str(npz_path),
         "ao_eri_array_key": f"ao_eri_block_{block_id:04d}",
@@ -5057,6 +5135,15 @@ def _build_ao_eri_contract_block(block: dict, energy_unit: str) -> dict:
         "environment_orbital_indices": list(block.get("environment_orbital_indices", [])),
         "ready": True,
     }
+    if ao_ordering_block:
+        payload["siesta_ao_ordering_manifest_path"] = str(Path(npz_path).parents[1] / "siesta_ao_ordering.json")
+        payload["siesta_ao_ordering_num_orbitals"] = ao_ordering_block.get("num_orbitals")
+        payload["siesta_ao_ordering_fingerprint"] = ao_ordering_block.get("ao_ordering_fingerprint")
+        payload["siesta_ao_records"] = ao_ordering_block.get("records", [])
+        payload["siesta_ao_labels_available"] = True
+    else:
+        payload["siesta_ao_labels_available"] = False
+    return payload
 
 
 def _pyscf_ao_eri_contract_block(mol: object, ao_eri_hartree: np.ndarray, block: dict) -> dict:
@@ -6039,6 +6126,109 @@ def _read_atom_orbital_ranges(
         if local_atom < len(local_to_global_atom_index):
             ranges[int(local_to_global_atom_index[local_atom])] = (start, end)
     return ranges
+
+
+def read_orbital_index_records(
+    orbital_index_path: str | os.PathLike[str] | None,
+    local_to_global_atom_index: Sequence[int] = (),
+) -> list[dict]:
+    """Parse SIESTA ORB_INDX rows into stable block-local AO ordering records."""
+
+    if orbital_index_path is None:
+        return []
+    path = Path(orbital_index_path)
+    records = []
+    for line in path.read_text(errors="replace").splitlines():
+        fields = line.split()
+        if len(fields) < 13:
+            continue
+        try:
+            orbital = int(fields[0]) - 1
+            local_atom = int(fields[1]) - 1
+            species_index = int(fields[2])
+            atom_orbital_index = int(fields[4])
+            principal_n = int(fields[5])
+            angular_l = int(fields[6])
+            magnetic_m = int(fields[7])
+            zeta = int(fields[8])
+            cutoff_radius = float(fields[11])
+        except (ValueError, IndexError):
+            continue
+        if orbital < 0 or local_atom < 0:
+            continue
+        global_atom = (
+            int(local_to_global_atom_index[local_atom])
+            if local_atom < len(local_to_global_atom_index)
+            else None
+        )
+        polarization = fields[9]
+        symbol = fields[10]
+        records.append(
+            {
+                "orbital_index": orbital,
+                "local_atom_index": local_atom,
+                "global_atom_index": global_atom,
+                "species_index": species_index,
+                "species_label": fields[3],
+                "atom_orbital_index": atom_orbital_index,
+                "principal_n": principal_n,
+                "angular_l": angular_l,
+                "magnetic_m": magnetic_m,
+                "zeta": zeta,
+                "polarization": polarization,
+                "symbol": symbol,
+                "cutoff_radius_bohr": cutoff_radius,
+                "label": _siesta_ao_record_label(
+                    local_atom=local_atom,
+                    global_atom=global_atom,
+                    species_label=fields[3],
+                    principal_n=principal_n,
+                    angular_l=angular_l,
+                    magnetic_m=magnetic_m,
+                    zeta=zeta,
+                    polarization=polarization,
+                    symbol=symbol,
+                ),
+            }
+        )
+    return records
+
+
+def _siesta_ao_record_label(
+    local_atom: int,
+    global_atom: int | None,
+    species_label: str,
+    principal_n: int,
+    angular_l: int,
+    magnetic_m: int,
+    zeta: int,
+    polarization: str,
+    symbol: str,
+) -> str:
+    atom_label = f"g{global_atom}" if global_atom is not None else f"l{local_atom}"
+    return (
+        f"{atom_label}:{species_label}:n{principal_n}:l{angular_l}:m{magnetic_m}:"
+        f"zeta{zeta}:pol{polarization}:sym{symbol}"
+    )
+
+
+def _ao_records_fingerprint(records: Sequence[dict]) -> str:
+    digest_payload = [
+        {
+            "orbital_index": record.get("orbital_index"),
+            "local_atom_index": record.get("local_atom_index"),
+            "global_atom_index": record.get("global_atom_index"),
+            "species_label": record.get("species_label"),
+            "principal_n": record.get("principal_n"),
+            "angular_l": record.get("angular_l"),
+            "magnetic_m": record.get("magnetic_m"),
+            "zeta": record.get("zeta"),
+            "polarization": record.get("polarization"),
+            "symbol": record.get("symbol"),
+        }
+        for record in records
+    ]
+    return hashlib.sha256(json.dumps(digest_payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _path_to_str(path: Path | None) -> str | None:

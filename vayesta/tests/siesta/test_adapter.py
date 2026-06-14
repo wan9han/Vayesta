@@ -1674,6 +1674,84 @@ def test_ao_eri_contract_manifest_exports_block_keys_and_fingerprints(tmp_path):
     assert json.loads((tmp_path / "ao_eri_contract.json").read_text()) == contract
 
 
+def test_siesta_ao_ordering_manifest_exports_orbital_index_records_to_contract(tmp_path):
+    block_dir = tmp_path / "block_0000"
+    block_dir.mkdir()
+    orbital_index_path = block_dir / "block_0000.ORB_INDX"
+    orbital_index_path.write_text(
+        "\n".join(
+            [
+                "io ia is spec iao n l m z p sym rc isc iuo",
+                "1 1 1 C 1 2 0 0 1 F s 4.139 0 0 0 1",
+                "2 1 1 C 2 2 1 1 2 T px 3.442 0 0 0 2",
+                "3 2 2 H 1 1 0 0 1 F s 4.743 0 0 0 3",
+            ]
+        )
+    )
+    (tmp_path / "blocks.json").write_text(
+        json.dumps(
+            [
+                {
+                    "block_id": 0,
+                    "local_to_global_atom_index": [10, 11],
+                }
+            ]
+        )
+    )
+    (tmp_path / "results.json").write_text(
+        json.dumps(
+            [
+                {
+                    "block_id": 0,
+                    "orbital_index_path": str(orbital_index_path),
+                }
+            ]
+        )
+    )
+    npz_path = block_dir / "cluster_hamiltonian_block_0000.npz"
+    np.savez_compressed(
+        npz_path,
+        basis_coefficients=np.eye(3),
+        lowdin_orthogonalizer=np.eye(3),
+        hamiltonian_orthogonalized=np.asarray([np.diag([1.0, 2.0, 3.0])]),
+        density_orthogonalized=np.asarray([np.diag([2.0, 0.0, 0.0])]),
+        overlap_orthogonalized=np.eye(3),
+    )
+    (tmp_path / "cluster_hamiltonians.json").write_text(
+        json.dumps(
+            {
+                "num_blocks": 1,
+                "ready": True,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "npz_path": str(npz_path),
+                        "cluster_basis_size": 3,
+                        "orthogonalized_basis_size": 3,
+                        "source_norbitals": 3,
+                    }
+                ],
+            }
+        )
+    )
+
+    records = adapter.read_orbital_index_records(orbital_index_path, local_to_global_atom_index=[10, 11])
+    ordering = adapter.write_siesta_ao_ordering_manifest(tmp_path)
+    contract = adapter.write_ao_eri_contract_manifest(tmp_path)
+
+    assert records[0]["global_atom_index"] == 10
+    assert records[1]["label"] == "g10:C:n2:l1:m1:zeta2:polT:sympx"
+    assert ordering["ready"] is True
+    assert ordering["blocks"][0]["num_orbitals"] == 3
+    assert len(ordering["blocks"][0]["ao_ordering_fingerprint"]) == 64
+    assert contract["source_siesta_ao_ordering"] == str(tmp_path / "siesta_ao_ordering.json")
+    assert contract["blocks"][0]["siesta_ao_labels_available"] is True
+    assert contract["blocks"][0]["siesta_ao_ordering_fingerprint"] == ordering["blocks"][0][
+        "ao_ordering_fingerprint"
+    ]
+    assert contract["blocks"][0]["siesta_ao_records"][2]["label"] == "g11:H:n1:l0:m0:zeta1:polF:syms"
+
+
 def test_pyscf_ao_eri_producer_writes_contract_npz(tmp_path):
     import pyscf.gto
 
