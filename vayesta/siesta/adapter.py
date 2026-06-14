@@ -492,6 +492,9 @@ class SiestaBlockWorkflow:
                     damping=self.config.predictive_boundary_damping,
                 )
             payload["embedded_observables"] = write_embedded_observables_manifest(self.config.workdir)
+            if self.config.predictive_boundary:
+                payload["predictive_ewf_closure"] = write_predictive_ewf_closure_manifest(self.config.workdir)
+                payload["embedded_observables"] = write_embedded_observables_manifest(self.config.workdir)
             payload["validation"] = write_validation_manifest(
                 self.config.workdir,
                 natoms=self.natoms,
@@ -1311,6 +1314,153 @@ def write_predictive_boundary_corrections_manifest(
         "corrections": corrections,
     }
     (workdir / "boundary_corrections.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
+def build_predictive_ewf_closure(
+    workdir: str | os.PathLike[str],
+    bath_threshold: float = 1.0e-6,
+) -> dict:
+    """Build an unreferenced EWF closure diagnostic from returned SIESTA matrices.
+
+    This is deliberately a mean-field closure layer: it constructs boundary bath
+    diagnostics and an external-potential double-counting term from the returned
+    block DM/HSX data, but it does not claim that a correlated solver has been
+    run.
+    """
+
+    workdir = Path(workdir)
+    validation = _read_optional_json(workdir / "validation.json") or {}
+    corrections = _read_optional_json(workdir / "boundary_corrections.json") or {}
+    predictive = _read_optional_json(workdir / "predictive_embedding_potential.json") or {}
+    observables = _read_optional_json(workdir / "embedded_observables.json") or {}
+    results = _read_json_list(workdir / "results.json") if (workdir / "results.json").exists() else collect_rank_results(workdir)
+    results_by_block = {int(result["block_id"]): result for result in results}
+
+    bath_terms = []
+    blockers = []
+    predictive_terms = [
+        term
+        for term in predictive.get("terms", [])
+        if term.get("status") == "parameterized"
+    ]
+    closure_terms = predictive_terms or corrections.get("corrections", [])
+    for term in closure_terms:
+        block_id = int(term.get("block_id", -1))
+        result = results_by_block.get(block_id)
+        if result is None:
+            blockers.append(f"Block {block_id} has no SIESTA result for bath construction")
+            continue
+        try:
+            bath_terms.append(
+                _compute_boundary_bath_from_result(
+                    result,
+                    int(term["core_atom"]),
+                    int(term["environment_atom"]),
+                    threshold=bath_threshold,
+                )
+            )
+        except Exception as exc:
+            blockers.append(f"Block {block_id} bath term {term.get('bond_atoms')} could not be evaluated: {exc}")
+
+    potential_terms = []
+    for result in results:
+        block_id = int(result["block_id"])
+        block_dir = workdir / f"block_{block_id:04d}"
+        potential_path = block_dir / "ewf_embedding_potential.dat"
+        if not potential_path.exists():
+            potential_terms.append(
+                {
+                    "block_id": block_id,
+                    "potential_file": str(potential_path),
+                    "present": False,
+                    "embedding_potential_expectation_ev": None,
+                    "matched_entries": 0,
+                    "missing_density_entries": 0,
+                }
+            )
+            continue
+        potential_terms.append(_compute_embedding_potential_expectation(result, potential_path))
+
+    potential_expectations = [
+        float(term["embedding_potential_expectation_ev"])
+        for term in potential_terms
+        if term.get("embedding_potential_expectation_ev") is not None
+    ]
+    total_potential_expectation = float(sum(potential_expectations))
+    boundary_energy = (
+        predictive.get("total_predictive_energy_correction_ev")
+        if predictive_terms and predictive.get("uses_reference_energy") is False
+        else observables.get("boundary_energy_correction_ev")
+    )
+    total_block_energy = validation.get("total_block_energy_ev", observables.get("total_block_energy_ev"))
+    predictive_total_energy = None
+    double_counting_correction = None
+    if total_block_energy is not None and boundary_energy is not None:
+        double_counting_correction = float(-total_potential_expectation)
+        predictive_total_energy = float(total_block_energy) + float(boundary_energy) + double_counting_correction
+
+    all_bath_ready = bool(bath_terms) and not blockers and all(term.get("bath_rank", 0) > 0 for term in bath_terms)
+    all_potential_expectations_ready = bool(potential_terms) and all(
+        term.get("embedding_potential_expectation_ev") is not None for term in potential_terms
+    )
+    predictive_ready = bool(
+        validation.get("ok")
+        and predictive.get("self_consistency_status") == "converged"
+        and predictive.get("sIESTA_external_potential_applied") is True
+        and all_bath_ready
+        and all_potential_expectations_ready
+    )
+    if not all_bath_ready:
+        blockers.append("At least one boundary bath term is missing or rank deficient")
+    if not all_potential_expectations_ready:
+        blockers.append("Embedding-potential expectation values are incomplete")
+
+    return {
+        "version": 1,
+        "closure_level": "predictive-mean-field-ewf-closure-v1",
+        "status": "ready" if predictive_ready else "diagnostic_incomplete",
+        "uses_reference_energy": False,
+        "production_predictive_physics_ready": False,
+        "production_blockers": [
+            "No correlated fragment solver has been run on the constructed bath space",
+            "No chemical-potential iteration across fragments is implemented",
+            "Double-counting correction is a mean-field external-potential expectation diagnostic",
+        ],
+        "correlated_solver_status": "not_run_mean_field_surrogate_only",
+        "bath_construction": {
+            "model": "boundary-density-svd-v1",
+            "threshold": float(bath_threshold),
+            "num_terms": len(bath_terms),
+            "total_bath_rank": int(sum(int(term.get("bath_rank", 0)) for term in bath_terms)),
+            "terms": bath_terms,
+        },
+        "double_counting": {
+            "model": "subtract-external-embedding-potential-expectation-v1",
+            "embedding_potential_expectation_ev": total_potential_expectation,
+            "energy_correction_ev": double_counting_correction,
+            "terms": potential_terms,
+        },
+        "energy": {
+            "policy": "block_sum_plus_boundary_correction_minus_embedding_potential_expectation",
+            "total_block_energy_ev": total_block_energy,
+            "boundary_energy_correction_ev": boundary_energy,
+            "double_counting_energy_correction_ev": double_counting_correction,
+            "predictive_total_energy_ev": predictive_total_energy,
+        },
+        "blockers": blockers,
+    }
+
+
+def write_predictive_ewf_closure_manifest(
+    workdir: str | os.PathLike[str],
+    bath_threshold: float = 1.0e-6,
+) -> dict:
+    """Write `predictive_ewf_closure.json` for the unreferenced EWF closure layer."""
+
+    workdir = Path(workdir)
+    payload = build_predictive_ewf_closure(workdir, bath_threshold=bath_threshold)
+    (workdir / "predictive_ewf_closure.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return payload
 
 
@@ -2248,6 +2398,7 @@ def build_embedded_observables(workdir: str | os.PathLike[str]) -> dict:
     corrections = _read_optional_json(workdir / "boundary_corrections.json") or {}
     electron = _read_optional_json(workdir / "electron_constraint.json") or {}
     global_matrices = _read_optional_json(workdir / "global_matrices.json") or {}
+    predictive_closure = _read_optional_json(workdir / "predictive_ewf_closure.json") or {}
     energy_corrections = [
         float(correction.get("energy_correction_ev", 0.0))
         for correction in corrections.get("corrections", [])
@@ -2272,6 +2423,14 @@ def build_embedded_observables(workdir: str | os.PathLike[str]) -> dict:
         "corrected_electron_count_deviation": electron.get("corrected_electron_count_deviation"),
         "density_overlap_trace_total": global_matrices.get("density_overlap_trace_total"),
         "matrix_ownership": "core_owned",
+        "predictive_ewf_closure_level": predictive_closure.get("closure_level"),
+        "predictive_ewf_closure_status": predictive_closure.get("status"),
+        "predictive_total_energy_ev": (predictive_closure.get("energy") or {}).get("predictive_total_energy_ev"),
+        "double_counting_energy_correction_ev": (predictive_closure.get("energy") or {}).get(
+            "double_counting_energy_correction_ev"
+        ),
+        "bath_total_rank": (predictive_closure.get("bath_construction") or {}).get("total_bath_rank"),
+        "correlated_solver_status": predictive_closure.get("correlated_solver_status"),
     }
 
 
@@ -2452,6 +2611,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     observables = _read_optional_json(workdir / "embedded_observables.json") or {}
     benchmark = _read_optional_json(workdir / "embedding_benchmark.json") or {}
     predictive = _read_optional_json(workdir / "predictive_embedding_potential.json") or {}
+    predictive_closure = _read_optional_json(workdir / "predictive_ewf_closure.json") or {}
 
     backend_ready = bool(validation.get("ok"))
     blockers = []
@@ -2489,6 +2649,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
         and predictive.get("self_consistency_status") == "converged"
         and predictive.get("sIESTA_external_potential_applied") is True
     )
+    predictive_ewf_closure_ready = predictive_closure.get("status") == "ready"
     return {
         "version": 1,
         "backend_artifacts_ready": backend_ready,
@@ -2496,6 +2657,8 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
         "embedded_observable_ready": embedded_ready,
         "reference_calibrated_correction_ready": reference_calibrated_ready,
         "predictive_boundary_potential_ready": predictive_potential_ready,
+        "predictive_ewf_closure_ready": predictive_ewf_closure_ready,
+        "production_predictive_physics_ready": bool(predictive_closure.get("production_predictive_physics_ready")),
         "benchmark_manifest_ready": benchmark_manifest_ready,
         "reference_benchmark_ready": reference_benchmark_ready,
         "predictive_embedding_ready": predictive_embedding_ready,
@@ -2522,6 +2685,19 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "predictive_total_energy_correction_ev": predictive.get("total_predictive_energy_correction_ev"),
             "predictive_siesta_external_potential_applied": predictive.get("sIESTA_external_potential_applied"),
             "predictive_blockers": predictive.get("blockers"),
+            "predictive_ewf_closure_level": predictive_closure.get("closure_level"),
+            "predictive_ewf_closure_status": predictive_closure.get("status"),
+            "predictive_ewf_total_energy_ev": (predictive_closure.get("energy") or {}).get(
+                "predictive_total_energy_ev"
+            ),
+            "predictive_ewf_double_counting_energy_correction_ev": (
+                predictive_closure.get("energy") or {}
+            ).get("double_counting_energy_correction_ev"),
+            "predictive_ewf_bath_total_rank": (predictive_closure.get("bath_construction") or {}).get(
+                "total_bath_rank"
+            ),
+            "predictive_ewf_correlated_solver_status": predictive_closure.get("correlated_solver_status"),
+            "production_predictive_blockers": predictive_closure.get("production_blockers"),
             "embedded_total_energy_ev": observables.get("embedded_total_energy_ev"),
             "benchmark_ok": benchmark.get("ok"),
             "benchmark_status": benchmark.get("status"),
@@ -3254,6 +3430,101 @@ def _compute_boundary_coupling_from_result(result: dict, core_atom: int, environ
         "density_hamiltonian_coupling_ev": float(coupling),
         "density_overlap_population": float(overlap_population),
         "sparse_hamiltonian_embedding_entries": sparse_entries,
+    }
+
+
+def _compute_boundary_bath_from_result(
+    result: dict,
+    core_atom: int,
+    environment_atom: int,
+    threshold: float = 1.0e-6,
+) -> dict:
+    ranges = {
+        int(atom): (int(bounds[0]), int(bounds[1]))
+        for atom, bounds in result.get("atom_orbital_ranges", {}).items()
+    }
+    if core_atom not in ranges:
+        raise ValueError(f"core atom {core_atom} has no orbital range")
+    if environment_atom not in ranges:
+        raise ValueError(f"environment atom {environment_atom} has no orbital range")
+    dm_path = result.get("density_matrix_path")
+    if not dm_path:
+        raise ValueError("density_matrix_path is missing")
+    dm = read_density_matrix_sparse(dm_path)
+    core_range = ranges[core_atom]
+    env_range = ranges[environment_atom]
+    ncore = core_range[1] - core_range[0]
+    nenv = env_range[1] - env_range[0]
+    block = np.zeros((ncore, nenv), dtype=float)
+    for index, (row, col) in enumerate(zip(dm.rows.tolist(), dm.cols.tolist())):
+        row = int(row)
+        col = int(col)
+        value = float(np.sum(dm.density[:, index]))
+        if core_range[0] <= row < core_range[1] and env_range[0] <= col < env_range[1]:
+            block[row - core_range[0], col - env_range[0]] += value
+        elif env_range[0] <= row < env_range[1] and core_range[0] <= col < core_range[1]:
+            block[col - core_range[0], row - env_range[0]] += value
+    singular_values = np.linalg.svd(block, compute_uv=False) if block.size else np.array([], dtype=float)
+    bath_rank = int(np.count_nonzero(singular_values > float(threshold)))
+    frobenius_norm = float(np.linalg.norm(block))
+    retained_norm = float(np.linalg.norm(singular_values[:bath_rank])) if bath_rank else 0.0
+    return {
+        "block_id": int(result["block_id"]),
+        "core_atom": int(core_atom),
+        "environment_atom": int(environment_atom),
+        "core_orbitals": int(ncore),
+        "environment_orbitals": int(nenv),
+        "model": "boundary-density-svd-v1",
+        "threshold": float(threshold),
+        "bath_rank": bath_rank,
+        "singular_values": [float(value) for value in singular_values.tolist()],
+        "frobenius_norm": frobenius_norm,
+        "retained_norm": retained_norm,
+        "discarded_norm": float(max(0.0, frobenius_norm * frobenius_norm - retained_norm * retained_norm) ** 0.5),
+    }
+
+
+def _compute_embedding_potential_expectation(result: dict, potential_path: Path) -> dict:
+    dm_path = result.get("density_matrix_path")
+    if not dm_path:
+        raise ValueError("density_matrix_path is missing")
+    dm = read_density_matrix_sparse(dm_path)
+    dm_lookup = {
+        (int(row), int(col)): index
+        for index, (row, col) in enumerate(zip(dm.rows.tolist(), dm.cols.tolist()))
+    }
+    expectation = 0.0
+    matched = 0
+    missing = 0
+    num_entries = 0
+    for line in potential_path.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fields = stripped.split()
+        if len(fields) < 4:
+            continue
+        row = int(fields[0]) - 1
+        col = int(fields[1]) - 1
+        spin = int(fields[2]) - 1
+        value = float(fields[3])
+        num_entries += 1
+        dm_index = dm_lookup.get((row, col))
+        if dm_index is None:
+            dm_index = dm_lookup.get((col, row))
+        if dm_index is None or spin < 0 or spin >= dm.density.shape[0]:
+            missing += 1
+            continue
+        expectation += float(dm.density[spin, dm_index]) * value
+        matched += 1
+    return {
+        "block_id": int(result["block_id"]),
+        "potential_file": str(potential_path),
+        "present": True,
+        "num_entries": num_entries,
+        "matched_entries": matched,
+        "missing_density_entries": missing,
+        "embedding_potential_expectation_ev": float(expectation),
     }
 
 

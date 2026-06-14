@@ -977,6 +977,84 @@ def test_predictive_boundary_corrections_use_returned_dm_hsx_without_reference(t
     assert "EWF.Embedding.PotentialFile   ewf_embedding_potential.dat" in (block_dir / "input.fdf").read_text()
 
 
+def test_predictive_ewf_closure_builds_bath_and_double_counting(tmp_path):
+    dm_path = tmp_path / "block_0000.DM"
+    hsx_path = tmp_path / "block_0000.HSX"
+    _write_full_dm(dm_path, [2, 1], [[1, 2], [2]], [[[1.0, 0.2], [1.0]]])
+    _write_full_hsx(hsx_path, [2, 1], [[1, 2], [2]], [[[0.0, 5.0], [0.0]]], [[1.0, 0.1], [1.0]])
+    block_dir = tmp_path / "block_0000"
+    block_dir.mkdir()
+    (block_dir / "ewf_embedding_potential.dat").write_text("# row col spin value_eV\n1 2 1 -2.5\n")
+    (tmp_path / "validation.json").write_text(json.dumps({"ok": True}))
+    (tmp_path / "results.json").write_text(
+        json.dumps(
+            [
+                {
+                    "block_id": 0,
+                    "rank": 0,
+                    "returncode": 0,
+                    "converged": True,
+                    "density_matrix_path": str(dm_path),
+                    "hamiltonian_matrix_path": str(hsx_path),
+                    "atom_orbital_ranges": {"0": [0, 1], "1": [1, 2]},
+                    "matrix_metadata": {"elsi": {"solver_used": ["NTPOLY"], "last_solver_settings": {"nt_method": 2}}},
+                }
+            ]
+        )
+    )
+    (tmp_path / "boundary_corrections.json").write_text(
+        json.dumps(
+            {
+                "correction_level": "predictive-boundary-coupling-v1",
+                "num_parameterized_corrections": 1,
+                "num_unparameterized_corrections": 0,
+                "corrections": [
+                    {
+                        "block_id": 0,
+                        "core_atom": 0,
+                        "environment_atom": 1,
+                        "bond_atoms": [0, 1],
+                        "energy_correction_ev": -0.5,
+                    }
+                ],
+            }
+        )
+    )
+    (tmp_path / "predictive_embedding_potential.json").write_text(
+        json.dumps(
+            {
+                "num_parameterized_terms": 1,
+                "uses_reference_energy": False,
+                "self_consistency_status": "converged",
+                "sIESTA_external_potential_applied": True,
+            }
+        )
+    )
+    (tmp_path / "electron_constraint.json").write_text(json.dumps({"chemical_potential_status": "applied"}))
+    (tmp_path / "embedded_observables.json").write_text(
+        json.dumps({"total_block_energy_ev": -10.0, "boundary_energy_correction_ev": -0.5})
+    )
+
+    closure = adapter.write_predictive_ewf_closure_manifest(tmp_path)
+    observables = adapter.write_embedded_observables_manifest(tmp_path)
+    readiness = adapter.build_physical_readiness_report(tmp_path)
+
+    assert closure["status"] == "ready"
+    assert closure["uses_reference_energy"] is False
+    assert closure["production_predictive_physics_ready"] is False
+    assert closure["bath_construction"]["total_bath_rank"] == 1
+    assert closure["bath_construction"]["terms"][0]["singular_values"] == [0.2]
+    assert closure["double_counting"]["embedding_potential_expectation_ev"] == -0.5
+    assert closure["energy"]["double_counting_energy_correction_ev"] == 0.5
+    assert closure["energy"]["predictive_total_energy_ev"] == -10.0
+    assert observables["predictive_ewf_closure_status"] == "ready"
+    assert observables["bath_total_rank"] == 1
+    assert observables["predictive_total_energy_ev"] == -10.0
+    assert readiness["predictive_ewf_closure_ready"] is True
+    assert readiness["production_predictive_physics_ready"] is False
+    assert readiness["diagnostic_outputs"]["predictive_ewf_bath_total_rank"] == 1
+
+
 def test_read_run_config_from_environment(tmp_path):
     config = adapter.read_run_config(
         {
