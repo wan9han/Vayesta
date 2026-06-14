@@ -324,6 +324,12 @@ inputs.  The current rerun potential is a sparse nonlocal boundary shift
 derived from returned SIESTA DM/HSX coupling terms.  It is still a minimal
 boundary model, not a full production correlated embedding potential.
 
+If `EWF_AO_ERI_NPZ=/path/to/ao_eri.npz` is set, `finalize()` also runs
+`write_cluster_two_electron_integrals_from_ao_manifest()` after cluster
+Hamiltonian construction.  `EWF_AO_ERI_ENERGY_UNIT` may be `ev` or `hartree`.
+Successful conversion causes the subsequent effective-correlated step to use
+external `ovov` tensors instead of the model U coupling.
+
 `SiestaEwfResult` is the first EWF-facing contract.  It keeps the local SIESTA
 matrix file paths and scalar status, but only assigns ownership to core atoms:
 

@@ -844,6 +844,9 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
             {
                 "artifact_level": "external-ao-eri-to-cluster-eigenbasis-ovov-v1",
                 "source": "external_ao_eri",
+                "source_ao_integrals_npz_path": "/tmp/ao_eri.npz",
+                "source_energy_unit": "hartree",
+                "output_energy_unit": "ev",
                 "ready": True,
                 "num_written_blocks": 1,
                 "uses_ab_initio_two_electron_integrals": True,
@@ -904,6 +907,9 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
     assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_ready"] is True
     assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_num_written_blocks"] == 1
     assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_uses_ab_initio"] is True
+    assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_source_path"] == "/tmp/ao_eri.npz"
+    assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_source_energy_unit"] == "hartree"
+    assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_output_energy_unit"] == "ev"
     assert payload["diagnostic_outputs"]["cluster_solver_ready"] is True
     assert payload["diagnostic_outputs"]["cluster_solver_num_solved_blocks"] == 1
     assert payload["diagnostic_outputs"]["cluster_solver_total_density_projected_one_electron_energy_ev"] == -2.0
@@ -1607,6 +1613,36 @@ def test_cluster_two_electron_integral_transform_feeds_effective_solver(tmp_path
     assert np.load(tensors["blocks"][0]["npz_path"])["ovov"].tolist() == [[[0.0, 0.4], [0.0, 0.0]]]
 
 
+def test_cluster_two_electron_integral_transform_records_input_failure(tmp_path):
+    (tmp_path / "cluster_hamiltonians.json").write_text(
+        json.dumps(
+            {
+                "num_blocks": 1,
+                "ready": True,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "npz_path": str(tmp_path / "missing_cluster.npz"),
+                    }
+                ],
+            }
+        )
+    )
+
+    payload = adapter.write_cluster_two_electron_integrals_from_ao_manifest(
+        tmp_path,
+        tmp_path / "missing_ao_eri.npz",
+        energy_unit="hartree",
+    )
+
+    assert payload["ready"] is False
+    assert payload["uses_ab_initio_two_electron_integrals"] is False
+    assert payload["source_energy_unit"] == "hartree"
+    assert payload["num_written_blocks"] == 0
+    assert "could not be loaded" in payload["blockers"][0]
+    assert json.loads((tmp_path / "cluster_two_electron_integrals.json").read_text()) == payload
+
+
 def test_effective_interaction_benchmark_scan_reports_fit_direction(tmp_path):
     block_dir = tmp_path / "block_0000"
     block_dir.mkdir()
@@ -1675,6 +1711,8 @@ def test_read_run_config_from_environment(tmp_path):
             "EWF_PREDICTIVE_BOUNDARY_RERUN": "true",
             "EWF_EFFECTIVE_INTERACTION_U_EV": "1.5",
             "EWF_EFFECTIVE_INTERACTION_DENOMINATOR_SHIFT_EV": "0.02",
+            "EWF_AO_ERI_NPZ": str(tmp_path / "ao_eri.npz"),
+            "EWF_AO_ERI_ENERGY_UNIT": "hartree",
         }
     )
 
@@ -1694,6 +1732,8 @@ def test_read_run_config_from_environment(tmp_path):
     assert config.predictive_boundary_rerun is True
     assert config.effective_interaction_u_ev == 1.5
     assert config.effective_interaction_denominator_shift_ev == 0.02
+    assert config.ao_eri_npz_path == tmp_path / "ao_eri.npz"
+    assert config.ao_eri_energy_unit == "hartree"
     assert config.solver.ntpoly_method == 2
     assert config.solver.ntpoly_filter == 1.0e-8
     assert config.solver.ntpoly_tolerance == 1.0e-5

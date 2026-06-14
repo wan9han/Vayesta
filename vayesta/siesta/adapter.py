@@ -140,6 +140,8 @@ class SiestaRunConfig:
     predictive_boundary_rerun: bool = False
     effective_interaction_u_ev: float = 0.0
     effective_interaction_denominator_shift_ev: float = 1.0e-6
+    ao_eri_npz_path: Path | None = None
+    ao_eri_energy_unit: str | None = None
     solver: SiestaSolverConfig = dataclasses.field(default_factory=SiestaSolverConfig)
 
 
@@ -500,6 +502,12 @@ class SiestaBlockWorkflow:
             if self.config.predictive_boundary:
                 payload["predictive_ewf_closure"] = write_predictive_ewf_closure_manifest(self.config.workdir)
                 payload["cluster_hamiltonians"] = write_cluster_hamiltonians_manifest(self.config.workdir)
+                if self.config.ao_eri_npz_path is not None:
+                    payload["cluster_two_electron_integrals"] = write_cluster_two_electron_integrals_from_ao_manifest(
+                        self.config.workdir,
+                        self.config.ao_eri_npz_path,
+                        energy_unit=self.config.ao_eri_energy_unit,
+                    )
                 payload["cluster_solver_results"] = write_cluster_solver_results_manifest(self.config.workdir)
                 payload["effective_correlated_results"] = write_effective_correlated_results_manifest(
                     self.config.workdir,
@@ -1616,16 +1624,28 @@ def build_cluster_two_electron_integrals_from_ao(
     workdir = Path(workdir)
     ao_integrals_npz_path = Path(ao_integrals_npz_path)
     clusters = _read_optional_json(workdir / "cluster_hamiltonians.json") or {}
-    ao_data = np.load(ao_integrals_npz_path)
-    if "ao_eri" not in ao_data:
-        raise ValueError("AO integral NPZ must contain an ao_eri array")
-    ao_eri = np.asarray(ao_data["ao_eri"], dtype=float)
-    source_energy_unit = _normalize_energy_unit(
-        energy_unit if energy_unit is not None else _npz_optional_scalar_string(ao_data, "energy_unit", "ev")
-    )
-    ao_eri_ev = ao_eri * _energy_unit_to_ev_factor(source_energy_unit)
-    if ao_eri.ndim != 4 or len(set(ao_eri.shape)) != 1:
-        raise ValueError("ao_eri must have shape (nao, nao, nao, nao)")
+    try:
+        ao_data = np.load(ao_integrals_npz_path)
+        if "ao_eri" not in ao_data:
+            raise ValueError("AO integral NPZ must contain an ao_eri array")
+        ao_eri = np.asarray(ao_data["ao_eri"], dtype=float)
+        source_energy_unit = _normalize_energy_unit(
+            energy_unit if energy_unit is not None else _npz_optional_scalar_string(ao_data, "energy_unit", "ev")
+        )
+        ao_eri_ev = ao_eri * _energy_unit_to_ev_factor(source_energy_unit)
+        if ao_eri.ndim != 4 or len(set(ao_eri.shape)) != 1:
+            raise ValueError("ao_eri must have shape (nao, nao, nao, nao)")
+    except Exception as exc:
+        payload = _cluster_two_electron_integral_failure_payload(
+            clusters,
+            ao_integrals_npz_path,
+            f"AO integral input could not be loaded: {exc}",
+            energy_unit=energy_unit,
+        )
+        (workdir / "cluster_two_electron_integrals.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        )
+        return payload
     blocks = []
     blockers = []
     updated_cluster_blocks = []
@@ -1675,6 +1695,29 @@ def write_cluster_two_electron_integrals_from_ao_manifest(
     """Write cluster two-electron/effective interaction NPZ files from an external AO ERI tensor."""
 
     return build_cluster_two_electron_integrals_from_ao(workdir, ao_integrals_npz_path, energy_unit=energy_unit)
+
+
+def _cluster_two_electron_integral_failure_payload(
+    clusters: dict,
+    ao_integrals_npz_path: Path,
+    reason: str,
+    energy_unit: str | None,
+) -> dict:
+    return {
+        "version": 1,
+        "artifact_level": "external-ao-eri-to-cluster-eigenbasis-ovov-v1",
+        "source_ao_integrals_npz_path": str(ao_integrals_npz_path),
+        "source": "external_ao_eri",
+        "source_energy_unit": energy_unit,
+        "output_energy_unit": "ev",
+        "uses_reference_energy": False,
+        "uses_ab_initio_two_electron_integrals": False,
+        "num_blocks": int(clusters.get("num_blocks", len(clusters.get("blocks", [])))),
+        "num_written_blocks": 0,
+        "ready": False,
+        "blockers": [reason],
+        "blocks": [],
+    }
 
 
 def solve_effective_interaction_clusters(
@@ -2242,6 +2285,8 @@ def read_run_config(environ: dict[str, str] | None = None) -> SiestaRunConfig:
             "EWF_EFFECTIVE_INTERACTION_DENOMINATOR_SHIFT_EV",
             1.0e-6,
         ),
+        ao_eri_npz_path=Path(environ["EWF_AO_ERI_NPZ"]) if environ.get("EWF_AO_ERI_NPZ") else None,
+        ao_eri_energy_unit=environ.get("EWF_AO_ERI_ENERGY_UNIT") or None,
         solver=solver,
     )
 
@@ -3189,6 +3234,9 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "cluster_hamiltonian_ready": clusters.get("ready"),
             "cluster_two_electron_integrals_artifact_level": cluster_integrals.get("artifact_level"),
             "cluster_two_electron_integrals_source": cluster_integrals.get("source"),
+            "cluster_two_electron_integrals_source_path": cluster_integrals.get("source_ao_integrals_npz_path"),
+            "cluster_two_electron_integrals_source_energy_unit": cluster_integrals.get("source_energy_unit"),
+            "cluster_two_electron_integrals_output_energy_unit": cluster_integrals.get("output_energy_unit"),
             "cluster_two_electron_integrals_num_written_blocks": cluster_integrals.get("num_written_blocks"),
             "cluster_two_electron_integrals_ready": cluster_integrals.get("ready"),
             "cluster_two_electron_integrals_uses_ab_initio": cluster_integrals.get(
