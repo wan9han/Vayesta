@@ -494,6 +494,7 @@ class SiestaBlockWorkflow:
             payload["embedded_observables"] = write_embedded_observables_manifest(self.config.workdir)
             if self.config.predictive_boundary:
                 payload["predictive_ewf_closure"] = write_predictive_ewf_closure_manifest(self.config.workdir)
+                payload["cluster_hamiltonians"] = write_cluster_hamiltonians_manifest(self.config.workdir)
                 payload["embedded_observables"] = write_embedded_observables_manifest(self.config.workdir)
             payload["validation"] = write_validation_manifest(
                 self.config.workdir,
@@ -1464,6 +1465,77 @@ def write_predictive_ewf_closure_manifest(
     return payload
 
 
+def build_cluster_hamiltonians(
+    workdir: str | os.PathLike[str],
+    bath_threshold: float = 1.0e-6,
+    overlap_eigenvalue_floor: float = 1.0e-8,
+) -> dict:
+    """Build solver-ready block cluster Hamiltonian artifacts.
+
+    The current artifact is a one-electron, SIESTA-AO based cluster input.  It
+    writes a compact NPZ per block containing the projected cluster basis,
+    Lowdin orthogonalizer, and transformed H/S/DM arrays.  A later correlated
+    solver can consume these files without reparsing SIESTA Fortran binaries.
+    """
+
+    workdir = Path(workdir)
+    blocks = _read_json_list(workdir / "blocks.json")
+    results = _read_json_list(workdir / "results.json") if (workdir / "results.json").exists() else collect_rank_results(workdir)
+    results_by_block = {int(result["block_id"]): result for result in results}
+    closure = _read_optional_json(workdir / "predictive_ewf_closure.json") or {}
+    block_payloads = []
+    blockers = []
+    for block in blocks:
+        block_id = int(block["block_id"])
+        result = results_by_block.get(block_id)
+        if result is None:
+            blockers.append(f"Block {block_id} has no SIESTA result for cluster Hamiltonian")
+            continue
+        try:
+            block_payloads.append(
+                _write_cluster_hamiltonian_for_block(
+                    workdir,
+                    block,
+                    result,
+                    closure,
+                    bath_threshold=bath_threshold,
+                    overlap_eigenvalue_floor=overlap_eigenvalue_floor,
+                )
+            )
+        except Exception as exc:
+            blockers.append(f"Block {block_id} cluster Hamiltonian failed: {exc}")
+    payload = {
+        "version": 1,
+        "artifact_level": "solver-ready-one-electron-cluster-v1",
+        "basis_model": "core-ao-plus-boundary-density-svd-bath",
+        "orthogonalization": "lowdin",
+        "uses_reference_energy": False,
+        "num_blocks": len(blocks),
+        "num_written_blocks": len(block_payloads),
+        "ready": len(block_payloads) == len(blocks) and not blockers,
+        "bath_threshold": float(bath_threshold),
+        "overlap_eigenvalue_floor": float(overlap_eigenvalue_floor),
+        "blockers": blockers,
+        "blocks": block_payloads,
+    }
+    (workdir / "cluster_hamiltonians.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
+def write_cluster_hamiltonians_manifest(
+    workdir: str | os.PathLike[str],
+    bath_threshold: float = 1.0e-6,
+    overlap_eigenvalue_floor: float = 1.0e-8,
+) -> dict:
+    """Write `cluster_hamiltonians.json` and per-block cluster NPZ files."""
+
+    return build_cluster_hamiltonians(
+        workdir,
+        bath_threshold=bath_threshold,
+        overlap_eigenvalue_floor=overlap_eigenvalue_floor,
+    )
+
+
 def write_siesta_embedding_potential_inputs(workdir: str | os.PathLike[str]) -> dict:
     """Write block-local SIESTA embedding potential files and FDF hooks."""
 
@@ -1707,6 +1779,7 @@ def attach_siesta_results_to_fragments(
     results: Sequence[SiestaEwfResult],
     strict: bool = True,
     predictive_ewf_closure: dict | None = None,
+    cluster_hamiltonians: dict | None = None,
 ) -> list[object]:
     """Attach projected SIESTA EWF results to Vayesta fragments by block id."""
 
@@ -1738,6 +1811,8 @@ def attach_siesta_results_to_fragments(
         fragment.siesta_core_matrix_metadata = dict(result.core_matrix_metadata)
         if predictive_ewf_closure:
             _attach_predictive_ewf_closure_to_fragment(fragment, int(block_id), predictive_ewf_closure)
+        if cluster_hamiltonians:
+            _attach_cluster_hamiltonian_to_fragment(fragment, int(block_id), cluster_hamiltonians)
         attached.append(fragment)
     return attached
 
@@ -1759,11 +1834,13 @@ def load_siesta_results_to_fragments(
         require_matrices=require_matrices,
     )
     predictive_closure = _read_optional_json(Path(workdir) / "predictive_ewf_closure.json")
+    cluster_hamiltonians = _read_optional_json(Path(workdir) / "cluster_hamiltonians.json")
     return attach_siesta_results_to_fragments(
         fragments,
         results,
         strict=strict,
         predictive_ewf_closure=predictive_closure,
+        cluster_hamiltonians=cluster_hamiltonians,
     )
 
 
@@ -2621,6 +2698,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     benchmark = _read_optional_json(workdir / "embedding_benchmark.json") or {}
     predictive = _read_optional_json(workdir / "predictive_embedding_potential.json") or {}
     predictive_closure = _read_optional_json(workdir / "predictive_ewf_closure.json") or {}
+    clusters = _read_optional_json(workdir / "cluster_hamiltonians.json") or {}
 
     backend_ready = bool(validation.get("ok"))
     blockers = []
@@ -2659,6 +2737,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
         and predictive.get("sIESTA_external_potential_applied") is True
     )
     predictive_ewf_closure_ready = predictive_closure.get("status") == "ready"
+    cluster_hamiltonians_ready = clusters.get("ready") is True
     return {
         "version": 1,
         "backend_artifacts_ready": backend_ready,
@@ -2667,6 +2746,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
         "reference_calibrated_correction_ready": reference_calibrated_ready,
         "predictive_boundary_potential_ready": predictive_potential_ready,
         "predictive_ewf_closure_ready": predictive_ewf_closure_ready,
+        "cluster_hamiltonians_ready": cluster_hamiltonians_ready,
         "production_predictive_physics_ready": bool(predictive_closure.get("production_predictive_physics_ready")),
         "benchmark_manifest_ready": benchmark_manifest_ready,
         "reference_benchmark_ready": reference_benchmark_ready,
@@ -2707,6 +2787,9 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             ),
             "predictive_ewf_correlated_solver_status": predictive_closure.get("correlated_solver_status"),
             "production_predictive_blockers": predictive_closure.get("production_blockers"),
+            "cluster_hamiltonian_artifact_level": clusters.get("artifact_level"),
+            "cluster_hamiltonian_num_written_blocks": clusters.get("num_written_blocks"),
+            "cluster_hamiltonian_ready": clusters.get("ready"),
             "embedded_total_energy_ev": observables.get("embedded_total_energy_ev"),
             "benchmark_ok": benchmark.get("ok"),
             "benchmark_status": benchmark.get("status"),
@@ -3160,6 +3243,26 @@ def _attach_predictive_ewf_closure_to_fragment(fragment: object, block_id: int, 
     )
 
 
+def _attach_cluster_hamiltonian_to_fragment(fragment: object, block_id: int, clusters: dict) -> None:
+    block_metadata = next(
+        (dict(block) for block in clusters.get("blocks", []) if int(block.get("block_id", -1)) == block_id),
+        None,
+    )
+    fragment.siesta_cluster_hamiltonians_ready = clusters.get("ready") is True
+    fragment.siesta_cluster_hamiltonian_manifest = {
+        "version": clusters.get("version"),
+        "artifact_level": clusters.get("artifact_level"),
+        "basis_model": clusters.get("basis_model"),
+        "orthogonalization": clusters.get("orthogonalization"),
+        "ready": clusters.get("ready"),
+    }
+    fragment.siesta_cluster_hamiltonian_metadata = block_metadata
+    fragment.siesta_cluster_hamiltonian_path = None if block_metadata is None else Path(block_metadata["npz_path"])
+    fragment.siesta_cluster_ready_for_correlated_solver = bool(
+        block_metadata and block_metadata.get("ready_for_correlated_solver")
+    )
+
+
 def _difference(value, reference) -> float | None:
     if value is None or reference is None:
         return None
@@ -3566,6 +3669,230 @@ def _compute_embedding_potential_expectation(result: dict, potential_path: Path)
         "missing_density_entries": missing,
         "embedding_potential_expectation_ev": float(expectation),
     }
+
+
+def _write_cluster_hamiltonian_for_block(
+    workdir: Path,
+    block: dict,
+    result: dict,
+    closure: dict,
+    bath_threshold: float,
+    overlap_eigenvalue_floor: float,
+) -> dict:
+    block_id = int(block["block_id"])
+    hsx_path = result.get("hamiltonian_matrix_path")
+    dm_path = result.get("density_matrix_path")
+    if not hsx_path:
+        raise ValueError("hamiltonian_matrix_path is missing")
+    if not dm_path:
+        raise ValueError("density_matrix_path is missing")
+    hsx = read_hsx_sparse(hsx_path)
+    dm = read_density_matrix_sparse(dm_path)
+    h_dense, s_dense = _dense_hsx_matrices(hsx)
+    d_dense = _dense_density_matrices(dm)
+    atom_ranges = {
+        int(atom): (int(bounds[0]), int(bounds[1]))
+        for atom, bounds in result.get("atom_orbital_ranges", {}).items()
+    }
+    local_to_global = [int(atom) for atom in block.get("local_to_global_atom_index", [])]
+    core_global = set(range(int(block["core_atom_start"]), int(block["core_atom_end"])))
+    core_local_atoms = [
+        local_atom
+        for local_atom, global_atom in enumerate(local_to_global)
+        if global_atom in core_global and local_atom in atom_ranges
+    ]
+    environment_local_atoms = [
+        local_atom
+        for local_atom, global_atom in enumerate(local_to_global)
+        if global_atom not in core_global and local_atom in atom_ranges
+    ]
+    core_indices = _orbital_indices_for_atoms(atom_ranges, core_local_atoms)
+    environment_indices = _orbital_indices_for_atoms(atom_ranges, environment_local_atoms)
+    bath_vectors, bath_terms = _cluster_bath_vectors_from_closure(
+        result,
+        closure,
+        core_indices,
+        environment_indices,
+        bath_threshold=bath_threshold,
+    )
+    basis, basis_labels = _cluster_basis_matrix(hsx.metadata.norbitals, core_indices, bath_vectors)
+    s_cluster = _symmetrize_dense(basis.T @ s_dense @ basis)
+    h_cluster = np.asarray([_symmetrize_dense(basis.T @ h_spin @ basis) for h_spin in h_dense])
+    d_cluster = np.asarray([_symmetrize_dense(basis.T @ d_spin @ basis) for d_spin in d_dense])
+    eigvals, eigvecs = np.linalg.eigh(s_cluster)
+    active = eigvals > float(overlap_eigenvalue_floor)
+    if not np.any(active):
+        raise ValueError("cluster overlap has no eigenvalues above floor")
+    lowdin = eigvecs[:, active] @ np.diag(1.0 / np.sqrt(eigvals[active]))
+    h_orth = np.asarray([_symmetrize_dense(lowdin.T @ h_spin @ lowdin) for h_spin in h_cluster])
+    d_orth = np.asarray([_symmetrize_dense(lowdin.T @ d_spin @ lowdin) for d_spin in d_cluster])
+    s_orth = _symmetrize_dense(lowdin.T @ s_cluster @ lowdin)
+    block_dir = workdir / f"block_{block_id:04d}"
+    npz_path = block_dir / f"cluster_hamiltonian_block_{block_id:04d}.npz"
+    np.savez_compressed(
+        npz_path,
+        basis_coefficients=basis,
+        overlap_cluster=s_cluster,
+        hamiltonian_cluster=h_cluster,
+        density_cluster=d_cluster,
+        lowdin_orthogonalizer=lowdin,
+        overlap_orthogonalized=s_orth,
+        hamiltonian_orthogonalized=h_orth,
+        density_orthogonalized=d_orth,
+        overlap_eigenvalues=eigvals,
+        core_orbital_indices=np.asarray(core_indices, dtype=np.int64),
+        environment_orbital_indices=np.asarray(environment_indices, dtype=np.int64),
+    )
+    metadata = {
+        "version": 1,
+        "block_id": block_id,
+        "artifact_level": "solver-ready-one-electron-cluster-v1",
+        "npz_path": str(npz_path),
+        "source_hamiltonian_matrix_path": str(hsx_path),
+        "source_density_matrix_path": str(dm_path),
+        "basis_model": "core-ao-plus-boundary-density-svd-bath",
+        "orthogonalization": "lowdin",
+        "nspin": int(hsx.metadata.nspin),
+        "source_norbitals": int(hsx.metadata.norbitals),
+        "num_core_orbitals": len(core_indices),
+        "num_environment_orbitals": len(environment_indices),
+        "num_bath_orbitals": len(bath_vectors),
+        "cluster_basis_size": int(basis.shape[1]),
+        "orthogonalized_basis_size": int(lowdin.shape[1]),
+        "overlap_min_eigenvalue": float(np.min(eigvals)) if eigvals.size else None,
+        "overlap_max_eigenvalue": float(np.max(eigvals)) if eigvals.size else None,
+        "overlap_eigenvalue_floor": float(overlap_eigenvalue_floor),
+        "num_discarded_overlap_vectors": int(np.count_nonzero(~active)),
+        "basis_labels": basis_labels,
+        "core_local_atoms": core_local_atoms,
+        "environment_local_atoms": environment_local_atoms,
+        "bath_terms": bath_terms,
+        "ready_for_correlated_solver": True,
+        "correlated_solver_status": "cluster_hamiltonian_ready_solver_not_run",
+    }
+    json_path = block_dir / f"cluster_hamiltonian_block_{block_id:04d}.json"
+    json_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+    return metadata
+
+
+def _dense_hsx_matrices(hsx: SiestaHsxMatrix) -> tuple[np.ndarray, np.ndarray]:
+    norb = int(hsx.metadata.norbitals)
+    nspin = int(hsx.metadata.nspin)
+    h_dense = np.zeros((nspin, norb, norb), dtype=float)
+    s_dense = np.zeros((norb, norb), dtype=float)
+    for index, (row, col) in enumerate(zip(hsx.rows.tolist(), hsx.cols.tolist())):
+        row = int(row)
+        col = int(col)
+        s_dense[row, col] += float(hsx.overlap[index])
+        for spin in range(nspin):
+            h_dense[spin, row, col] += float(hsx.hamiltonian[spin, index])
+    return np.asarray([_symmetrize_dense(mat) for mat in h_dense]), _symmetrize_dense(s_dense)
+
+
+def _dense_density_matrices(dm: SiestaDensityMatrix) -> np.ndarray:
+    norb = int(dm.metadata.norbitals)
+    nspin = int(dm.metadata.nspin)
+    d_dense = np.zeros((nspin, norb, norb), dtype=float)
+    for index, (row, col) in enumerate(zip(dm.rows.tolist(), dm.cols.tolist())):
+        row = int(row)
+        col = int(col)
+        for spin in range(nspin):
+            d_dense[spin, row, col] += float(dm.density[spin, index])
+    return np.asarray([_symmetrize_dense(mat) for mat in d_dense])
+
+
+def _symmetrize_dense(matrix: np.ndarray) -> np.ndarray:
+    return 0.5 * (np.asarray(matrix, dtype=float) + np.asarray(matrix, dtype=float).T)
+
+
+def _orbital_indices_for_atoms(atom_ranges: dict[int, tuple[int, int]], atoms: Sequence[int]) -> list[int]:
+    return [
+        orbital
+        for atom in atoms
+        for orbital in range(int(atom_ranges[atom][0]), int(atom_ranges[atom][1]))
+    ]
+
+
+def _cluster_bath_vectors_from_closure(
+    result: dict,
+    closure: dict,
+    core_indices: Sequence[int],
+    environment_indices: Sequence[int],
+    bath_threshold: float,
+) -> tuple[list[np.ndarray], list[dict]]:
+    block_id = int(result["block_id"])
+    atom_ranges = {
+        int(atom): (int(bounds[0]), int(bounds[1]))
+        for atom, bounds in result.get("atom_orbital_ranges", {}).items()
+    }
+    dm = read_density_matrix_sparse(result["density_matrix_path"])
+    d_dense = np.sum(_dense_density_matrices(dm), axis=0)
+    bath_vectors: list[np.ndarray] = []
+    bath_terms = []
+    for term in (closure.get("bath_construction") or {}).get("terms", []):
+        if int(term.get("block_id", -1)) != block_id:
+            continue
+        core_atom = int(term["core_atom"])
+        env_atom = int(term["environment_atom"])
+        if core_atom not in atom_ranges or env_atom not in atom_ranges:
+            continue
+        core_range = atom_ranges[core_atom]
+        env_range = atom_ranges[env_atom]
+        core = list(range(core_range[0], core_range[1]))
+        env = list(range(env_range[0], env_range[1]))
+        density_block = d_dense[np.ix_(core, env)]
+        if density_block.size == 0:
+            continue
+        _u, singular_values, vh = np.linalg.svd(density_block, full_matrices=False)
+        rank = int(np.count_nonzero(singular_values > float(bath_threshold)))
+        term_vectors = []
+        for vector_index in range(rank):
+            coeff = np.zeros(dm.metadata.norbitals, dtype=float)
+            coeff[env] = vh[vector_index, :]
+            bath_vectors.append(coeff)
+            term_vectors.append(len(bath_vectors) - 1)
+        bath_terms.append(
+            {
+                "core_atom": core_atom,
+                "environment_atom": env_atom,
+                "singular_values": [float(value) for value in singular_values.tolist()],
+                "bath_rank": rank,
+                "bath_vector_indices": term_vectors,
+            }
+        )
+    if not bath_vectors and environment_indices:
+        for orbital in environment_indices:
+            coeff = np.zeros(dm.metadata.norbitals, dtype=float)
+            coeff[int(orbital)] = 1.0
+            bath_vectors.append(coeff)
+        bath_terms.append(
+            {
+                "fallback": "environment-ao-unit-vectors",
+                "bath_rank": len(environment_indices),
+                "bath_vector_indices": list(range(len(environment_indices))),
+            }
+        )
+    return bath_vectors, bath_terms
+
+
+def _cluster_basis_matrix(
+    norbitals: int,
+    core_indices: Sequence[int],
+    bath_vectors: Sequence[np.ndarray],
+) -> tuple[np.ndarray, list[dict]]:
+    columns = []
+    labels = []
+    for orbital in core_indices:
+        coeff = np.zeros(int(norbitals), dtype=float)
+        coeff[int(orbital)] = 1.0
+        labels.append({"kind": "core_ao", "source_orbital": int(orbital)})
+        columns.append(coeff)
+    for index, vector in enumerate(bath_vectors):
+        labels.append({"kind": "bath_svd", "bath_vector": int(index)})
+        columns.append(np.asarray(vector, dtype=float))
+    if not columns:
+        raise ValueError("cluster basis has no core or bath vectors")
+    return np.column_stack(columns), labels
 
 
 def _predictive_boundary_error_term(term: dict, reason: str) -> dict:

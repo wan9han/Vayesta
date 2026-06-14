@@ -5,6 +5,7 @@ import struct
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from vayesta.siesta import adapter
@@ -330,6 +331,25 @@ def test_load_siesta_results_to_fragments_projects_run_directory(tmp_path):
             }
         )
     )
+    (tmp_path / "cluster_hamiltonians.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "artifact_level": "solver-ready-one-electron-cluster-v1",
+                "basis_model": "core-ao-plus-boundary-density-svd-bath",
+                "orthogonalization": "lowdin",
+                "ready": True,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "npz_path": str(tmp_path / "block_0000" / "cluster_hamiltonian_block_0000.npz"),
+                        "ready_for_correlated_solver": True,
+                        "cluster_basis_size": 2,
+                    }
+                ],
+            }
+        )
+    )
     fragment = type("FakeFragment", (), {"siesta_block_id": 0})()
 
     attached = adapter.load_siesta_results_to_fragments(
@@ -353,6 +373,10 @@ def test_load_siesta_results_to_fragments_projects_run_directory(tmp_path):
     ]
     assert fragment.siesta_embedding_potential_expectation_terms[0]["matched_entries"] == 4
     assert fragment.siesta_predictive_ewf_closure["correlated_solver_status"] == "not_run_mean_field_surrogate_only"
+    assert fragment.siesta_cluster_hamiltonians_ready is True
+    assert fragment.siesta_cluster_ready_for_correlated_solver is True
+    assert fragment.siesta_cluster_hamiltonian_path == tmp_path / "block_0000" / "cluster_hamiltonian_block_0000.npz"
+    assert fragment.siesta_cluster_hamiltonian_metadata["cluster_basis_size"] == 2
 
 
 def test_generate_block_directories(tmp_path):
@@ -746,15 +770,27 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
             }
         )
     )
+    (tmp_path / "cluster_hamiltonians.json").write_text(
+        json.dumps(
+            {
+                "artifact_level": "solver-ready-one-electron-cluster-v1",
+                "ready": True,
+                "num_written_blocks": 1,
+            }
+        )
+    )
 
     payload = adapter.build_physical_readiness_report(tmp_path)
 
     assert payload["predictive_boundary_potential_ready"] is True
+    assert payload["cluster_hamiltonians_ready"] is True
     assert payload["predictive_embedding_ready"] is False
     assert payload["predictive_embedding_status"] == "single_shot_not_self_consistent"
     assert payload["diagnostic_outputs"]["predictive_potential_uses_reference_energy"] is False
     assert payload["diagnostic_outputs"]["predictive_total_energy_correction_ev"] == -0.5
     assert payload["diagnostic_outputs"]["predictive_siesta_external_potential_applied"] is False
+    assert payload["diagnostic_outputs"]["cluster_hamiltonian_ready"] is True
+    assert payload["diagnostic_outputs"]["cluster_hamiltonian_num_written_blocks"] == 1
 
 
 def test_embedded_observables_manifest_combines_energy_and_electron_closure(tmp_path):
@@ -1094,6 +1130,78 @@ def test_predictive_ewf_closure_builds_bath_and_double_counting(tmp_path):
     assert readiness["predictive_ewf_closure_ready"] is True
     assert readiness["production_predictive_physics_ready"] is False
     assert readiness["diagnostic_outputs"]["predictive_ewf_bath_total_rank"] == 1
+
+
+def test_cluster_hamiltonians_write_solver_ready_npz(tmp_path):
+    dm_path = tmp_path / "block_0000.DM"
+    hsx_path = tmp_path / "block_0000.HSX"
+    _write_full_dm(dm_path, [2, 1], [[1, 2], [2]], [[[1.0, 0.2], [1.0]]])
+    _write_full_hsx(hsx_path, [2, 1], [[1, 2], [2]], [[[1.0, 0.1], [0.8]]], [[1.0, 0.0], [1.0]])
+    block_dir = tmp_path / "block_0000"
+    block_dir.mkdir()
+    (tmp_path / "blocks.json").write_text(
+        json.dumps(
+            [
+                {
+                    "block_id": 0,
+                    "core_atom_start": 0,
+                    "core_atom_end": 1,
+                    "input_atom_start": 0,
+                    "input_atom_end": 2,
+                    "local_to_global_atom_index": [0, 1],
+                }
+            ]
+        )
+    )
+    (tmp_path / "results.json").write_text(
+        json.dumps(
+            [
+                {
+                    "block_id": 0,
+                    "rank": 0,
+                    "returncode": 0,
+                    "converged": True,
+                    "density_matrix_path": str(dm_path),
+                    "hamiltonian_matrix_path": str(hsx_path),
+                    "atom_orbital_ranges": {"0": [0, 1], "1": [1, 2]},
+                }
+            ]
+        )
+    )
+    (tmp_path / "predictive_ewf_closure.json").write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "bath_construction": {
+                    "terms": [
+                        {
+                            "block_id": 0,
+                            "core_atom": 0,
+                            "environment_atom": 1,
+                            "bath_rank": 1,
+                        }
+                    ]
+                },
+            }
+        )
+    )
+
+    payload = adapter.write_cluster_hamiltonians_manifest(tmp_path)
+    block = payload["blocks"][0]
+
+    assert payload["ready"] is True
+    assert block["ready_for_correlated_solver"] is True
+    assert block["num_core_orbitals"] == 1
+    assert block["num_bath_orbitals"] == 1
+    assert block["cluster_basis_size"] == 2
+    assert block["orthogonalized_basis_size"] == 2
+    assert Path(block["npz_path"]).exists()
+    arrays = np.load(block["npz_path"])
+    assert arrays["basis_coefficients"].shape == (2, 2)
+    assert arrays["hamiltonian_orthogonalized"].shape == (1, 2, 2)
+    assert arrays["density_orthogonalized"].shape == (1, 2, 2)
+    assert np.allclose(arrays["overlap_orthogonalized"], np.eye(2))
+    assert json.loads((block_dir / "cluster_hamiltonian_block_0000.json").read_text()) == block
 
 
 def test_read_run_config_from_environment(tmp_path):
