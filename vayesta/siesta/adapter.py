@@ -503,6 +503,7 @@ class SiestaBlockWorkflow:
             if self.config.predictive_boundary:
                 payload["predictive_ewf_closure"] = write_predictive_ewf_closure_manifest(self.config.workdir)
                 payload["cluster_hamiltonians"] = write_cluster_hamiltonians_manifest(self.config.workdir)
+                payload["ao_eri_contract"] = write_ao_eri_contract_manifest(self.config.workdir)
                 if self.config.ao_eri_npz_path is not None:
                     payload["cluster_two_electron_integrals"] = write_cluster_two_electron_integrals_from_ao_manifest(
                         self.config.workdir,
@@ -1606,6 +1607,48 @@ def write_cluster_solver_results_manifest(workdir: str | os.PathLike[str]) -> di
     """Write `cluster_solver_results.json` by solving cluster Hamiltonian NPZ files."""
 
     return solve_cluster_hamiltonians(workdir)
+
+
+def build_ao_eri_contract(workdir: str | os.PathLike[str], energy_unit: str = "ev") -> dict:
+    """Build a machine-readable contract for external block-local AO ERI producers."""
+
+    workdir = Path(workdir)
+    clusters = _read_optional_json(workdir / "cluster_hamiltonians.json") or {}
+    blocks = []
+    blockers = []
+    for block in clusters.get("blocks", []):
+        try:
+            blocks.append(_build_ao_eri_contract_block(block, energy_unit=energy_unit))
+        except Exception as exc:
+            block_id = block.get("block_id", "unknown")
+            blockers.append(f"Block {block_id} AO ERI contract failed: {exc}")
+    payload = {
+        "version": 1,
+        "contract_level": "external-ao-eri-producer-contract-v1",
+        "source_cluster_hamiltonians": str(workdir / "cluster_hamiltonians.json"),
+        "required_npz_arrays": ["energy_unit"],
+        "accepted_energy_units": ["ev", "hartree"],
+        "requested_energy_unit": _normalize_energy_unit(energy_unit),
+        "ao_ordering_scope": "block_local_siesta_orbital_order",
+        "num_blocks": int(clusters.get("num_blocks", len(blocks))),
+        "num_contract_blocks": len(blocks),
+        "ready": len(blocks) == int(clusters.get("num_blocks", len(blocks))) and not blockers,
+        "blockers": blockers,
+        "blocks": blocks,
+    }
+    return payload
+
+
+def write_ao_eri_contract_manifest(
+    workdir: str | os.PathLike[str],
+    energy_unit: str = "ev",
+) -> dict:
+    """Write `ao_eri_contract.json` for an external AO ERI producer."""
+
+    workdir = Path(workdir)
+    payload = build_ao_eri_contract(workdir, energy_unit=energy_unit)
+    (workdir / "ao_eri_contract.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
 
 
 def build_cluster_two_electron_integrals_from_ao(
@@ -3161,6 +3204,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     predictive = _read_optional_json(workdir / "predictive_embedding_potential.json") or {}
     predictive_closure = _read_optional_json(workdir / "predictive_ewf_closure.json") or {}
     clusters = _read_optional_json(workdir / "cluster_hamiltonians.json") or {}
+    ao_eri_contract = _read_optional_json(workdir / "ao_eri_contract.json") or {}
     cluster_integrals = _read_optional_json(workdir / "cluster_two_electron_integrals.json") or {}
     cluster_solver = _read_optional_json(workdir / "cluster_solver_results.json") or {}
     effective = _read_optional_json(workdir / "effective_correlated_results.json") or {}
@@ -3204,6 +3248,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     )
     predictive_ewf_closure_ready = predictive_closure.get("status") == "ready"
     cluster_hamiltonians_ready = clusters.get("ready") is True
+    ao_eri_contract_ready = ao_eri_contract.get("ready") is True
     cluster_two_electron_integrals_ready = cluster_integrals.get("ready") is True
     cluster_solver_ready = cluster_solver.get("ready") is True
     effective_correlated_ready = effective.get("ready") is True
@@ -3216,6 +3261,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
         "predictive_boundary_potential_ready": predictive_potential_ready,
         "predictive_ewf_closure_ready": predictive_ewf_closure_ready,
         "cluster_hamiltonians_ready": cluster_hamiltonians_ready,
+        "ao_eri_contract_ready": ao_eri_contract_ready,
         "cluster_two_electron_integrals_ready": cluster_two_electron_integrals_ready,
         "cluster_solver_results_ready": cluster_solver_ready,
         "effective_correlated_results_ready": effective_correlated_ready,
@@ -3263,6 +3309,11 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "cluster_hamiltonian_artifact_level": clusters.get("artifact_level"),
             "cluster_hamiltonian_num_written_blocks": clusters.get("num_written_blocks"),
             "cluster_hamiltonian_ready": clusters.get("ready"),
+            "ao_eri_contract_level": ao_eri_contract.get("contract_level"),
+            "ao_eri_contract_ready": ao_eri_contract.get("ready"),
+            "ao_eri_contract_num_blocks": ao_eri_contract.get("num_blocks"),
+            "ao_eri_contract_num_contract_blocks": ao_eri_contract.get("num_contract_blocks"),
+            "ao_eri_contract_requested_energy_unit": ao_eri_contract.get("requested_energy_unit"),
             "cluster_two_electron_integrals_artifact_level": cluster_integrals.get("artifact_level"),
             "cluster_two_electron_integrals_source": cluster_integrals.get("source"),
             "cluster_two_electron_integrals_source_path": cluster_integrals.get("source_ao_integrals_npz_path"),
@@ -4721,6 +4772,34 @@ def _write_cluster_two_electron_integrals_for_block(
         "num_cluster_orbitals": int(ovov_array.shape[1]),
         "ovov_shape": list(ovov_array.shape),
         "max_abs_coupling_ev": float(np.max(np.abs(ovov_array))) if ovov_array.size else 0.0,
+        "ready": True,
+    }
+
+
+def _build_ao_eri_contract_block(block: dict, energy_unit: str) -> dict:
+    npz_path = Path(block["npz_path"])
+    arrays = np.load(npz_path)
+    basis_coefficients = np.asarray(arrays["basis_coefficients"], dtype=float)
+    if basis_coefficients.ndim != 2:
+        raise ValueError("basis_coefficients must have shape (nao, ncluster)")
+    nao = int(basis_coefficients.shape[0])
+    block_id = int(block["block_id"])
+    fingerprint = _block_ao_ordering_fingerprint(block, nao)
+    return {
+        "block_id": block_id,
+        "cluster_hamiltonian_npz_path": str(npz_path),
+        "ao_eri_array_key": f"ao_eri_block_{block_id:04d}",
+        "ao_ordering_fingerprint_key": f"ao_ordering_fingerprint_block_{block_id:04d}",
+        "required_ao_eri_shape": [nao, nao, nao, nao],
+        "ao_dimension": nao,
+        "energy_unit": _normalize_energy_unit(energy_unit),
+        "ao_ordering_scope": "block_local_siesta_orbital_order",
+        "ao_ordering_fingerprint": fingerprint,
+        "source_norbitals": int(block.get("source_norbitals", nao)),
+        "core_local_atoms": list(block.get("core_local_atoms", [])),
+        "environment_local_atoms": list(block.get("environment_local_atoms", [])),
+        "core_orbital_indices": list(block.get("core_orbital_indices", [])),
+        "environment_orbital_indices": list(block.get("environment_orbital_indices", [])),
         "ready": True,
     }
 

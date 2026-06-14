@@ -839,6 +839,17 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
             }
         )
     )
+    (tmp_path / "ao_eri_contract.json").write_text(
+        json.dumps(
+            {
+                "contract_level": "external-ao-eri-producer-contract-v1",
+                "ready": True,
+                "num_blocks": 1,
+                "num_contract_blocks": 1,
+                "requested_energy_unit": "ev",
+            }
+        )
+    )
     (tmp_path / "cluster_two_electron_integrals.json").write_text(
         json.dumps(
             {
@@ -902,6 +913,7 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
 
     assert payload["predictive_boundary_potential_ready"] is True
     assert payload["cluster_hamiltonians_ready"] is True
+    assert payload["ao_eri_contract_ready"] is True
     assert payload["cluster_two_electron_integrals_ready"] is True
     assert payload["cluster_solver_results_ready"] is True
     assert payload["effective_correlated_results_ready"] is True
@@ -913,6 +925,9 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
     assert payload["diagnostic_outputs"]["predictive_siesta_external_potential_applied"] is False
     assert payload["diagnostic_outputs"]["cluster_hamiltonian_ready"] is True
     assert payload["diagnostic_outputs"]["cluster_hamiltonian_num_written_blocks"] == 1
+    assert payload["diagnostic_outputs"]["ao_eri_contract_ready"] is True
+    assert payload["diagnostic_outputs"]["ao_eri_contract_num_contract_blocks"] == 1
+    assert payload["diagnostic_outputs"]["ao_eri_contract_requested_energy_unit"] == "ev"
     assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_ready"] is True
     assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_num_written_blocks"] == 1
     assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_uses_ab_initio"] is True
@@ -1608,6 +1623,50 @@ def test_effective_interaction_solver_consumes_external_two_electron_integrals(t
     assert block["spin_channels"][0]["pair_terms_sample"][0]["coupling_ev"] == pytest.approx(0.75)
     assert block["correlation_energy_ev"] == pytest.approx(-(0.75**2) / 2.0)
     assert payload["total_correlation_energy_ev"] == pytest.approx(-(0.75**2) / 2.0)
+
+
+def test_ao_eri_contract_manifest_exports_block_keys_and_fingerprints(tmp_path):
+    blocks = []
+    for block_id, nao in [(0, 2), (1, 3)]:
+        block_dir = tmp_path / f"block_{block_id:04d}"
+        block_dir.mkdir()
+        npz_path = block_dir / f"cluster_hamiltonian_block_{block_id:04d}.npz"
+        np.savez_compressed(
+            npz_path,
+            basis_coefficients=np.eye(nao),
+            lowdin_orthogonalizer=np.eye(nao),
+            hamiltonian_orthogonalized=np.asarray([np.diag(np.arange(1, nao + 1, dtype=float))]),
+            density_orthogonalized=np.asarray([np.diag([2.0] + [0.0] * (nao - 1))]),
+            overlap_orthogonalized=np.eye(nao),
+        )
+        blocks.append(
+            {
+                "block_id": block_id,
+                "npz_path": str(npz_path),
+                "cluster_basis_size": nao,
+                "orthogonalized_basis_size": nao,
+                "source_norbitals": nao,
+                "core_local_atoms": [0],
+                "environment_local_atoms": [1],
+            }
+        )
+    (tmp_path / "cluster_hamiltonians.json").write_text(
+        json.dumps({"num_blocks": 2, "ready": True, "blocks": blocks})
+    )
+
+    contract = adapter.write_ao_eri_contract_manifest(tmp_path, energy_unit="hartree")
+
+    assert contract["ready"] is True
+    assert contract["contract_level"] == "external-ao-eri-producer-contract-v1"
+    assert contract["requested_energy_unit"] == "hartree"
+    assert [block["ao_eri_array_key"] for block in contract["blocks"]] == ["ao_eri_block_0000", "ao_eri_block_0001"]
+    assert [block["ao_ordering_fingerprint_key"] for block in contract["blocks"]] == [
+        "ao_ordering_fingerprint_block_0000",
+        "ao_ordering_fingerprint_block_0001",
+    ]
+    assert [block["required_ao_eri_shape"] for block in contract["blocks"]] == [[2, 2, 2, 2], [3, 3, 3, 3]]
+    assert all(len(block["ao_ordering_fingerprint"]) == 64 for block in contract["blocks"])
+    assert json.loads((tmp_path / "ao_eri_contract.json").read_text()) == contract
 
 
 def test_cluster_two_electron_integral_transform_feeds_effective_solver(tmp_path):
