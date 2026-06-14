@@ -350,6 +350,25 @@ def test_load_siesta_results_to_fragments_projects_run_directory(tmp_path):
             }
         )
     )
+    (tmp_path / "cluster_solver_results.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "solver_level": "one-electron-lowdin-cluster-reference-v1",
+                "solver_kind": "one_electron_reference",
+                "ready": True,
+                "correlated_solver_status": "not_run_one_electron_reference_only",
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "solver_status": "solved",
+                        "density_projected_one_electron_energy_ev": -1.25,
+                        "aufbau_one_electron_energy_ev": -1.5,
+                    }
+                ],
+            }
+        )
+    )
     fragment = type("FakeFragment", (), {"siesta_block_id": 0})()
 
     attached = adapter.load_siesta_results_to_fragments(
@@ -377,6 +396,10 @@ def test_load_siesta_results_to_fragments_projects_run_directory(tmp_path):
     assert fragment.siesta_cluster_ready_for_correlated_solver is True
     assert fragment.siesta_cluster_hamiltonian_path == tmp_path / "block_0000" / "cluster_hamiltonian_block_0000.npz"
     assert fragment.siesta_cluster_hamiltonian_metadata["cluster_basis_size"] == 2
+    assert fragment.siesta_cluster_solver_results_ready is True
+    assert fragment.siesta_cluster_solver_status == "solved"
+    assert fragment.siesta_cluster_one_electron_energy_ev == -1.25
+    assert fragment.siesta_cluster_aufbau_energy_ev == -1.5
 
 
 def test_generate_block_directories(tmp_path):
@@ -779,11 +802,24 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
             }
         )
     )
+    (tmp_path / "cluster_solver_results.json").write_text(
+        json.dumps(
+            {
+                "solver_level": "one-electron-lowdin-cluster-reference-v1",
+                "solver_kind": "one_electron_reference",
+                "ready": True,
+                "num_solved_blocks": 1,
+                "total_density_projected_one_electron_energy_ev": -2.0,
+                "total_aufbau_one_electron_energy_ev": -2.5,
+            }
+        )
+    )
 
     payload = adapter.build_physical_readiness_report(tmp_path)
 
     assert payload["predictive_boundary_potential_ready"] is True
     assert payload["cluster_hamiltonians_ready"] is True
+    assert payload["cluster_solver_results_ready"] is True
     assert payload["predictive_embedding_ready"] is False
     assert payload["predictive_embedding_status"] == "single_shot_not_self_consistent"
     assert payload["diagnostic_outputs"]["predictive_potential_uses_reference_energy"] is False
@@ -791,6 +827,9 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
     assert payload["diagnostic_outputs"]["predictive_siesta_external_potential_applied"] is False
     assert payload["diagnostic_outputs"]["cluster_hamiltonian_ready"] is True
     assert payload["diagnostic_outputs"]["cluster_hamiltonian_num_written_blocks"] == 1
+    assert payload["diagnostic_outputs"]["cluster_solver_ready"] is True
+    assert payload["diagnostic_outputs"]["cluster_solver_num_solved_blocks"] == 1
+    assert payload["diagnostic_outputs"]["cluster_solver_total_density_projected_one_electron_energy_ev"] == -2.0
 
 
 def test_embedded_observables_manifest_combines_energy_and_electron_closure(tmp_path):
@@ -820,6 +859,18 @@ def test_embedded_observables_manifest_combines_energy_and_electron_closure(tmp_
         )
     )
     (tmp_path / "global_matrices.json").write_text(json.dumps({"density_overlap_trace_total": 4.5}))
+    (tmp_path / "cluster_solver_results.json").write_text(
+        json.dumps(
+            {
+                "solver_level": "one-electron-lowdin-cluster-reference-v1",
+                "solver_kind": "one_electron_reference",
+                "ready": True,
+                "total_density_projected_one_electron_energy_ev": -2.0,
+                "total_aufbau_one_electron_energy_ev": -2.5,
+                "correlated_solver_status": "not_run_one_electron_reference_only",
+            }
+        )
+    )
 
     payload = adapter.write_embedded_observables_manifest(tmp_path)
 
@@ -827,6 +878,9 @@ def test_embedded_observables_manifest_combines_energy_and_electron_closure(tmp_
     assert payload["embedded_total_energy_ev"] == -10.25
     assert payload["boundary_energy_correction_ev"] == -0.25
     assert payload["corrected_density_overlap_trace"] == 5.0
+    assert payload["cluster_solver_ready"] is True
+    assert payload["cluster_solver_total_density_projected_one_electron_energy_ev"] == -2.0
+    assert payload["cluster_solver_correlated_status"] == "not_run_one_electron_reference_only"
     assert json.loads((tmp_path / "embedded_observables.json").read_text()) == payload
 
 
@@ -1202,6 +1256,96 @@ def test_cluster_hamiltonians_write_solver_ready_npz(tmp_path):
     assert arrays["density_orthogonalized"].shape == (1, 2, 2)
     assert np.allclose(arrays["overlap_orthogonalized"], np.eye(2))
     assert json.loads((block_dir / "cluster_hamiltonian_block_0000.json").read_text()) == block
+
+
+def test_cluster_hamiltonian_density_projection_uses_overlap_metric(tmp_path):
+    dm_path = tmp_path / "block_0000.DM"
+    hsx_path = tmp_path / "block_0000.HSX"
+    _write_full_dm(dm_path, [1], [[1]], [[[1.0]]])
+    _write_full_hsx(hsx_path, [1], [[1]], [[[2.0]]], [[2.0]])
+    block_dir = tmp_path / "block_0000"
+    block_dir.mkdir()
+    (tmp_path / "blocks.json").write_text(
+        json.dumps(
+            [
+                {
+                    "block_id": 0,
+                    "core_atom_start": 0,
+                    "core_atom_end": 1,
+                    "input_atom_start": 0,
+                    "input_atom_end": 1,
+                    "local_to_global_atom_index": [0],
+                }
+            ]
+        )
+    )
+    (tmp_path / "results.json").write_text(
+        json.dumps(
+            [
+                {
+                    "block_id": 0,
+                    "rank": 0,
+                    "returncode": 0,
+                    "converged": True,
+                    "density_matrix_path": str(dm_path),
+                    "hamiltonian_matrix_path": str(hsx_path),
+                    "atom_orbital_ranges": {"0": [0, 1]},
+                }
+            ]
+        )
+    )
+    (tmp_path / "predictive_ewf_closure.json").write_text(json.dumps({"bath_construction": {"terms": []}}))
+
+    payload = adapter.write_cluster_hamiltonians_manifest(tmp_path)
+    arrays = np.load(payload["blocks"][0]["npz_path"])
+
+    assert arrays["overlap_cluster"].tolist() == [[2.0]]
+    assert arrays["density_cluster"].tolist() == [[[4.0]]]
+    assert np.allclose(arrays["density_orthogonalized"], [[[2.0]]])
+
+
+def test_cluster_solver_consumes_cluster_npz(tmp_path):
+    block_dir = tmp_path / "block_0000"
+    block_dir.mkdir()
+    npz_path = block_dir / "cluster_hamiltonian_block_0000.npz"
+    np.savez_compressed(
+        npz_path,
+        hamiltonian_orthogonalized=np.asarray([[[1.0, 0.0], [0.0, 3.0]]]),
+        density_orthogonalized=np.asarray([[[2.0, 0.0], [0.0, 0.0]]]),
+        overlap_orthogonalized=np.eye(2),
+    )
+    (tmp_path / "cluster_hamiltonians.json").write_text(
+        json.dumps(
+            {
+                "num_blocks": 1,
+                "ready": True,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "npz_path": str(npz_path),
+                        "cluster_basis_size": 2,
+                        "orthogonalized_basis_size": 2,
+                        "num_core_orbitals": 1,
+                        "num_bath_orbitals": 1,
+                    }
+                ],
+            }
+        )
+    )
+
+    payload = adapter.write_cluster_solver_results_manifest(tmp_path)
+    block = payload["blocks"][0]
+
+    assert payload["ready"] is True
+    assert payload["solver_kind"] == "one_electron_reference"
+    assert payload["correlated_solver_status"] == "not_run_one_electron_reference_only"
+    assert block["solver_status"] == "solved"
+    assert block["electron_count_from_density"] == 2.0
+    assert block["density_projected_one_electron_energy_ev"] == 2.0
+    assert block["aufbau_one_electron_energy_ev"] == 2.0
+    assert block["density_vs_aufbau_energy_delta_ev"] == 0.0
+    assert block["spin_channels"][0]["first_eigenvalues_ev"] == [1.0, 3.0]
+    assert json.loads((tmp_path / "cluster_solver_results.json").read_text()) == payload
 
 
 def test_read_run_config_from_environment(tmp_path):

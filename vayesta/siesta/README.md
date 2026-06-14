@@ -251,6 +251,9 @@ block artifacts:
 - `cluster_hamiltonians.json` records solver-ready one-electron cluster
   artifacts.  Each block writes a compressed NPZ with core AO + SVD bath basis
   coefficients, Lowdin orthogonalizer, and orthogonalized H/S/DM arrays.
+- `cluster_solver_results.json` consumes those NPZ files with a one-electron
+  Lowdin reference solver.  This verifies the solver interface but is not a
+  correlated EWF solver.
 
 When these files are present and validation passes, `physical_readiness.json`
 reports `embedded_observable_ready`.  This is a minimal embedding closure, not a
@@ -288,6 +291,7 @@ The public collection helpers are:
 - `write_predictive_boundary_corrections_manifest(workdir)`: replace `boundary_corrections.json` with predictive boundary-coupling corrections.
 - `write_predictive_ewf_closure_manifest(workdir)`: write bath-rank and mean-field double-counting diagnostics from returned SIESTA matrices.
 - `write_cluster_hamiltonians_manifest(workdir)`: write per-block cluster Hamiltonian NPZ files and `cluster_hamiltonians.json`.
+- `write_cluster_solver_results_manifest(workdir)`: solve the cluster Hamiltonian NPZ files with the one-electron reference solver.
 - `summarize_run(workdir)`: build rank/block success, timing, and matrix-size metrics.
 - `write_run_summary_manifest(workdir)`: write those metrics to `run_summary.json`.
 - `compare_weak_scaling_runs(workdirs)`: compare multiple `run_summary.json` files.

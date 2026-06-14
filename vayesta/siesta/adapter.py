@@ -495,6 +495,7 @@ class SiestaBlockWorkflow:
             if self.config.predictive_boundary:
                 payload["predictive_ewf_closure"] = write_predictive_ewf_closure_manifest(self.config.workdir)
                 payload["cluster_hamiltonians"] = write_cluster_hamiltonians_manifest(self.config.workdir)
+                payload["cluster_solver_results"] = write_cluster_solver_results_manifest(self.config.workdir)
                 payload["embedded_observables"] = write_embedded_observables_manifest(self.config.workdir)
             payload["validation"] = write_validation_manifest(
                 self.config.workdir,
@@ -1536,6 +1537,58 @@ def write_cluster_hamiltonians_manifest(
     )
 
 
+def solve_cluster_hamiltonians(
+    workdir: str | os.PathLike[str],
+) -> dict:
+    """Consume cluster Hamiltonian NPZ files with a one-electron reference solver."""
+
+    workdir = Path(workdir)
+    clusters = _read_optional_json(workdir / "cluster_hamiltonians.json") or {}
+    blocks = []
+    blockers = []
+    for block in clusters.get("blocks", []):
+        try:
+            blocks.append(_solve_one_cluster_hamiltonian(block))
+        except Exception as exc:
+            block_id = block.get("block_id", "unknown")
+            blockers.append(f"Block {block_id} cluster solver failed: {exc}")
+    total_density_energy = [
+        block["density_projected_one_electron_energy_ev"]
+        for block in blocks
+        if block.get("density_projected_one_electron_energy_ev") is not None
+    ]
+    total_aufbau_energy = [
+        block["aufbau_one_electron_energy_ev"]
+        for block in blocks
+        if block.get("aufbau_one_electron_energy_ev") is not None
+    ]
+    payload = {
+        "version": 1,
+        "solver_level": "one-electron-lowdin-cluster-reference-v1",
+        "solver_kind": "one_electron_reference",
+        "uses_reference_energy": False,
+        "correlated_solver_status": "not_run_one_electron_reference_only",
+        "production_predictive_physics_ready": False,
+        "num_blocks": int(clusters.get("num_blocks", len(blocks))),
+        "num_solved_blocks": len(blocks),
+        "ready": len(blocks) == int(clusters.get("num_blocks", len(blocks))) and not blockers,
+        "total_density_projected_one_electron_energy_ev": float(sum(total_density_energy))
+        if total_density_energy
+        else None,
+        "total_aufbau_one_electron_energy_ev": float(sum(total_aufbau_energy)) if total_aufbau_energy else None,
+        "blockers": blockers,
+        "blocks": blocks,
+    }
+    (workdir / "cluster_solver_results.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
+def write_cluster_solver_results_manifest(workdir: str | os.PathLike[str]) -> dict:
+    """Write `cluster_solver_results.json` by solving cluster Hamiltonian NPZ files."""
+
+    return solve_cluster_hamiltonians(workdir)
+
+
 def write_siesta_embedding_potential_inputs(workdir: str | os.PathLike[str]) -> dict:
     """Write block-local SIESTA embedding potential files and FDF hooks."""
 
@@ -1780,6 +1833,7 @@ def attach_siesta_results_to_fragments(
     strict: bool = True,
     predictive_ewf_closure: dict | None = None,
     cluster_hamiltonians: dict | None = None,
+    cluster_solver_results: dict | None = None,
 ) -> list[object]:
     """Attach projected SIESTA EWF results to Vayesta fragments by block id."""
 
@@ -1813,6 +1867,8 @@ def attach_siesta_results_to_fragments(
             _attach_predictive_ewf_closure_to_fragment(fragment, int(block_id), predictive_ewf_closure)
         if cluster_hamiltonians:
             _attach_cluster_hamiltonian_to_fragment(fragment, int(block_id), cluster_hamiltonians)
+        if cluster_solver_results:
+            _attach_cluster_solver_result_to_fragment(fragment, int(block_id), cluster_solver_results)
         attached.append(fragment)
     return attached
 
@@ -1835,12 +1891,14 @@ def load_siesta_results_to_fragments(
     )
     predictive_closure = _read_optional_json(Path(workdir) / "predictive_ewf_closure.json")
     cluster_hamiltonians = _read_optional_json(Path(workdir) / "cluster_hamiltonians.json")
+    cluster_solver_results = _read_optional_json(Path(workdir) / "cluster_solver_results.json")
     return attach_siesta_results_to_fragments(
         fragments,
         results,
         strict=strict,
         predictive_ewf_closure=predictive_closure,
         cluster_hamiltonians=cluster_hamiltonians,
+        cluster_solver_results=cluster_solver_results,
     )
 
 
@@ -2485,6 +2543,7 @@ def build_embedded_observables(workdir: str | os.PathLike[str]) -> dict:
     electron = _read_optional_json(workdir / "electron_constraint.json") or {}
     global_matrices = _read_optional_json(workdir / "global_matrices.json") or {}
     predictive_closure = _read_optional_json(workdir / "predictive_ewf_closure.json") or {}
+    cluster_solver = _read_optional_json(workdir / "cluster_solver_results.json") or {}
     energy_corrections = [
         float(correction.get("energy_correction_ev", 0.0))
         for correction in corrections.get("corrections", [])
@@ -2517,6 +2576,16 @@ def build_embedded_observables(workdir: str | os.PathLike[str]) -> dict:
         ),
         "bath_total_rank": (predictive_closure.get("bath_construction") or {}).get("total_bath_rank"),
         "correlated_solver_status": predictive_closure.get("correlated_solver_status"),
+        "cluster_solver_level": cluster_solver.get("solver_level"),
+        "cluster_solver_kind": cluster_solver.get("solver_kind"),
+        "cluster_solver_ready": cluster_solver.get("ready"),
+        "cluster_solver_total_density_projected_one_electron_energy_ev": cluster_solver.get(
+            "total_density_projected_one_electron_energy_ev"
+        ),
+        "cluster_solver_total_aufbau_one_electron_energy_ev": cluster_solver.get(
+            "total_aufbau_one_electron_energy_ev"
+        ),
+        "cluster_solver_correlated_status": cluster_solver.get("correlated_solver_status"),
     }
 
 
@@ -2699,6 +2768,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     predictive = _read_optional_json(workdir / "predictive_embedding_potential.json") or {}
     predictive_closure = _read_optional_json(workdir / "predictive_ewf_closure.json") or {}
     clusters = _read_optional_json(workdir / "cluster_hamiltonians.json") or {}
+    cluster_solver = _read_optional_json(workdir / "cluster_solver_results.json") or {}
 
     backend_ready = bool(validation.get("ok"))
     blockers = []
@@ -2738,6 +2808,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     )
     predictive_ewf_closure_ready = predictive_closure.get("status") == "ready"
     cluster_hamiltonians_ready = clusters.get("ready") is True
+    cluster_solver_ready = cluster_solver.get("ready") is True
     return {
         "version": 1,
         "backend_artifacts_ready": backend_ready,
@@ -2747,6 +2818,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
         "predictive_boundary_potential_ready": predictive_potential_ready,
         "predictive_ewf_closure_ready": predictive_ewf_closure_ready,
         "cluster_hamiltonians_ready": cluster_hamiltonians_ready,
+        "cluster_solver_results_ready": cluster_solver_ready,
         "production_predictive_physics_ready": bool(predictive_closure.get("production_predictive_physics_ready")),
         "benchmark_manifest_ready": benchmark_manifest_ready,
         "reference_benchmark_ready": reference_benchmark_ready,
@@ -2790,6 +2862,16 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "cluster_hamiltonian_artifact_level": clusters.get("artifact_level"),
             "cluster_hamiltonian_num_written_blocks": clusters.get("num_written_blocks"),
             "cluster_hamiltonian_ready": clusters.get("ready"),
+            "cluster_solver_level": cluster_solver.get("solver_level"),
+            "cluster_solver_kind": cluster_solver.get("solver_kind"),
+            "cluster_solver_ready": cluster_solver.get("ready"),
+            "cluster_solver_num_solved_blocks": cluster_solver.get("num_solved_blocks"),
+            "cluster_solver_total_density_projected_one_electron_energy_ev": cluster_solver.get(
+                "total_density_projected_one_electron_energy_ev"
+            ),
+            "cluster_solver_total_aufbau_one_electron_energy_ev": cluster_solver.get(
+                "total_aufbau_one_electron_energy_ev"
+            ),
             "embedded_total_energy_ev": observables.get("embedded_total_energy_ev"),
             "benchmark_ok": benchmark.get("ok"),
             "benchmark_status": benchmark.get("status"),
@@ -3263,6 +3345,29 @@ def _attach_cluster_hamiltonian_to_fragment(fragment: object, block_id: int, clu
     )
 
 
+def _attach_cluster_solver_result_to_fragment(fragment: object, block_id: int, solver_results: dict) -> None:
+    block_result = next(
+        (dict(block) for block in solver_results.get("blocks", []) if int(block.get("block_id", -1)) == block_id),
+        None,
+    )
+    fragment.siesta_cluster_solver_results_ready = solver_results.get("ready") is True
+    fragment.siesta_cluster_solver_manifest = {
+        "version": solver_results.get("version"),
+        "solver_level": solver_results.get("solver_level"),
+        "solver_kind": solver_results.get("solver_kind"),
+        "ready": solver_results.get("ready"),
+        "correlated_solver_status": solver_results.get("correlated_solver_status"),
+    }
+    fragment.siesta_cluster_solver_result = block_result
+    fragment.siesta_cluster_solver_status = None if block_result is None else block_result.get("solver_status")
+    fragment.siesta_cluster_one_electron_energy_ev = None if block_result is None else block_result.get(
+        "density_projected_one_electron_energy_ev"
+    )
+    fragment.siesta_cluster_aufbau_energy_ev = None if block_result is None else block_result.get(
+        "aufbau_one_electron_energy_ev"
+    )
+
+
 def _difference(value, reference) -> float | None:
     if value is None or reference is None:
         return None
@@ -3718,7 +3823,7 @@ def _write_cluster_hamiltonian_for_block(
     basis, basis_labels = _cluster_basis_matrix(hsx.metadata.norbitals, core_indices, bath_vectors)
     s_cluster = _symmetrize_dense(basis.T @ s_dense @ basis)
     h_cluster = np.asarray([_symmetrize_dense(basis.T @ h_spin @ basis) for h_spin in h_dense])
-    d_cluster = np.asarray([_symmetrize_dense(basis.T @ d_spin @ basis) for d_spin in d_dense])
+    d_cluster = np.asarray([_symmetrize_dense(basis.T @ s_dense @ d_spin @ s_dense @ basis) for d_spin in d_dense])
     eigvals, eigvecs = np.linalg.eigh(s_cluster)
     active = eigvals > float(overlap_eigenvalue_floor)
     if not np.any(active):
@@ -3893,6 +3998,78 @@ def _cluster_basis_matrix(
     if not columns:
         raise ValueError("cluster basis has no core or bath vectors")
     return np.column_stack(columns), labels
+
+
+def _solve_one_cluster_hamiltonian(block: dict) -> dict:
+    npz_path = Path(block["npz_path"])
+    arrays = np.load(npz_path)
+    h_orth = np.asarray(arrays["hamiltonian_orthogonalized"], dtype=float)
+    d_orth = np.asarray(arrays["density_orthogonalized"], dtype=float)
+    if h_orth.ndim != 3:
+        raise ValueError("hamiltonian_orthogonalized must have shape (nspin, norb, norb)")
+    if d_orth.shape != h_orth.shape:
+        raise ValueError("density_orthogonalized shape does not match hamiltonian_orthogonalized")
+    nspin = int(h_orth.shape[0])
+    max_occupation = 2.0 if nspin == 1 else 1.0
+    spin_results = []
+    density_energy = 0.0
+    aufbau_energy = 0.0
+    total_electrons = 0.0
+    for spin in range(nspin):
+        h_spin = _symmetrize_dense(h_orth[spin])
+        d_spin = _symmetrize_dense(d_orth[spin])
+        eigenvalues = np.linalg.eigvalsh(h_spin)
+        electron_count = float(np.trace(d_spin))
+        occupations = _aufbau_occupations(eigenvalues.size, electron_count, max_occupation)
+        spin_density_energy = float(np.trace(d_spin @ h_spin))
+        spin_aufbau_energy = float(np.dot(occupations, eigenvalues))
+        density_energy += spin_density_energy
+        aufbau_energy += spin_aufbau_energy
+        total_electrons += electron_count
+        spin_results.append(
+            {
+                "spin": spin,
+                "num_orbitals": int(eigenvalues.size),
+                "electron_count_from_density": electron_count,
+                "max_occupation": max_occupation,
+                "num_fractional_occupations": int(np.count_nonzero((occupations > 0.0) & (occupations < max_occupation))),
+                "eigenvalue_min_ev": float(eigenvalues[0]) if eigenvalues.size else None,
+                "eigenvalue_max_ev": float(eigenvalues[-1]) if eigenvalues.size else None,
+                "eigenvalue_sum_ev": float(np.sum(eigenvalues)),
+                "occupied_eigenvalue_energy_ev": spin_aufbau_energy,
+                "density_projected_energy_ev": spin_density_energy,
+                "first_eigenvalues_ev": [float(value) for value in eigenvalues[: min(8, eigenvalues.size)].tolist()],
+            }
+        )
+    return {
+        "block_id": int(block["block_id"]),
+        "cluster_npz_path": str(npz_path),
+        "solver_status": "solved",
+        "solver_kind": "one_electron_reference",
+        "correlated_solver_status": "not_run_one_electron_reference_only",
+        "production_predictive_physics_ready": False,
+        "cluster_basis_size": int(block["cluster_basis_size"]),
+        "orthogonalized_basis_size": int(block["orthogonalized_basis_size"]),
+        "num_core_orbitals": int(block["num_core_orbitals"]),
+        "num_bath_orbitals": int(block["num_bath_orbitals"]),
+        "electron_count_from_density": total_electrons,
+        "density_projected_one_electron_energy_ev": float(density_energy),
+        "aufbau_one_electron_energy_ev": float(aufbau_energy),
+        "density_vs_aufbau_energy_delta_ev": float(density_energy - aufbau_energy),
+        "spin_channels": spin_results,
+    }
+
+
+def _aufbau_occupations(norb: int, electron_count: float, max_occupation: float) -> np.ndarray:
+    remaining = max(0.0, float(electron_count))
+    occupations = np.zeros(int(norb), dtype=float)
+    for index in range(int(norb)):
+        if remaining <= 0.0:
+            break
+        occ = min(float(max_occupation), remaining)
+        occupations[index] = occ
+        remaining -= occ
+    return occupations
 
 
 def _predictive_boundary_error_term(term: dict, reason: str) -> dict:
