@@ -381,6 +381,14 @@ with different local block sizes, use `ao_eri_block_0000`,
 entries when the ERI producer can prove it used the same block-local SIESTA AO
 order.
 
+Set `EWF_PYSCF_AO_MAPPING_MODE=auto` to have `finalize()` try the PySCF ERI
+producer path automatically.  This requires `EWF_PYSCF_BASIS`; optional
+`EWF_PYSCF_CHARGE`, `EWF_PYSCF_SPIN`, and `EWF_PYSCF_COORD_UNIT` control the
+PySCF molecule built from the FDF coordinates.  The auto path writes
+`pyscf_ao_mapping.json` and `pyscf_external_eri_workflow.json`.  If PySCF AO
+labels do not match the SIESTA `ORB_INDX` records, the workflow records a
+blocker instead of guessing a mapping.
+
 `SiestaEwfResult` is the first EWF-facing contract.  It keeps the local SIESTA
 matrix file paths and scalar status, but only assigns ownership to core atoms:
 

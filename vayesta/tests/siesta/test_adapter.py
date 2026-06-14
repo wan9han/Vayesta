@@ -1863,6 +1863,95 @@ def test_pyscf_ao_mapping_from_siesta_labels_reports_basis_mismatch(tmp_path):
     assert "no PySCF AO candidate" in mapping["blockers"][0]
 
 
+def test_build_pyscf_mol_from_fdf_uses_species_labels_and_basis():
+    fdf = adapter.FdfInput(
+        lines=(),
+        atoms=(
+            adapter.Atom(global_index=0, x=0.0, y=0.0, z=0.0, species=1),
+            adapter.Atom(global_index=1, x=0.0, y=0.0, z=0.74, species=1),
+        ),
+        coordinates_start=0,
+        coordinates_end=0,
+        species_labels={1: "H"},
+        species_atomic_numbers={1: 1},
+    )
+
+    mol = adapter.build_pyscf_mol_from_fdf(fdf, basis="sto-3g")
+
+    assert mol.nao_nr() == 2
+    assert mol.atom_symbol(0) == "H"
+    assert mol.atom_symbol(1) == "H"
+
+
+def test_configured_pyscf_external_eri_workflow_writes_mapping_blocker(tmp_path):
+    fdf = adapter.FdfInput(
+        lines=(),
+        atoms=(adapter.Atom(global_index=0, x=0.0, y=0.0, z=0.0, species=1),),
+        coordinates_start=0,
+        coordinates_end=0,
+        species_labels={1: "H"},
+        species_atomic_numbers={1: 1},
+    )
+    contract_path = tmp_path / "ao_eri_contract.json"
+    contract_path.write_text(
+        json.dumps(
+            {
+                "num_blocks": 1,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "ao_ordering_fingerprint": "a" * 64,
+                        "siesta_ao_ordering_fingerprint": "b" * 64,
+                        "siesta_ao_records": [
+                            {
+                                "orbital_index": 0,
+                                "global_atom_index": 0,
+                                "species_label": "H",
+                                "angular_l": 0,
+                                "magnetic_m": 0,
+                            },
+                            {
+                                "orbital_index": 1,
+                                "global_atom_index": 0,
+                                "species_label": "H",
+                                "angular_l": 0,
+                                "magnetic_m": 0,
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    config = adapter.SiestaRunConfig(
+        num_machines=1,
+        procs_per_machine=1,
+        threads_per_proc=1,
+        workdir=tmp_path,
+        siesta_bin=None,
+        block_atoms=1,
+        buffer_atoms=0,
+        block_groups=None,
+        group_size_atoms=None,
+        buffer_groups=0,
+        terminal_cap_atoms=0,
+        dry_run=False,
+        pyscf_ao_mapping_mode="auto",
+        pyscf_basis="sto-3g",
+        pyscf_spin=1,
+    )
+
+    payload = adapter.run_configured_pyscf_external_eri_workflow(tmp_path, fdf, config)
+    mapping = json.loads((tmp_path / "pyscf_ao_mapping.json").read_text())
+
+    assert payload["ready"] is False
+    assert payload["stage"] == "pyscf_ao_mapping"
+    assert "did not match" in payload["blockers"][0]
+    assert mapping["ready"] is False
+    assert "no PySCF AO candidate" in mapping["blockers"][0]
+    assert json.loads((tmp_path / "pyscf_external_eri_workflow.json").read_text()) == payload
+
+
 def test_pyscf_ao_eri_producer_writes_contract_npz(tmp_path):
     import pyscf.gto
 
@@ -2410,6 +2499,11 @@ def test_read_run_config_from_environment(tmp_path):
             "EWF_EFFECTIVE_INTERACTION_DENOMINATOR_SHIFT_EV": "0.02",
             "EWF_AO_ERI_NPZ": str(tmp_path / "ao_eri.npz"),
             "EWF_AO_ERI_ENERGY_UNIT": "hartree",
+            "EWF_PYSCF_AO_MAPPING_MODE": "auto",
+            "EWF_PYSCF_BASIS": "sto-3g",
+            "EWF_PYSCF_CHARGE": "1",
+            "EWF_PYSCF_SPIN": "1",
+            "EWF_PYSCF_COORD_UNIT": "Bohr",
         }
     )
 
@@ -2431,6 +2525,11 @@ def test_read_run_config_from_environment(tmp_path):
     assert config.effective_interaction_denominator_shift_ev == 0.02
     assert config.ao_eri_npz_path == tmp_path / "ao_eri.npz"
     assert config.ao_eri_energy_unit == "hartree"
+    assert config.pyscf_ao_mapping_mode == "auto"
+    assert config.pyscf_basis == "sto-3g"
+    assert config.pyscf_charge == 1
+    assert config.pyscf_spin == 1
+    assert config.pyscf_coord_unit == "Bohr"
     assert config.solver.ntpoly_method == 2
     assert config.solver.ntpoly_filter == 1.0e-8
     assert config.solver.ntpoly_tolerance == 1.0e-5

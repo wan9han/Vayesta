@@ -143,6 +143,11 @@ class SiestaRunConfig:
     effective_interaction_denominator_shift_ev: float = 1.0e-6
     ao_eri_npz_path: Path | None = None
     ao_eri_energy_unit: str | None = None
+    pyscf_ao_mapping_mode: str = "off"
+    pyscf_basis: str | None = None
+    pyscf_charge: int = 0
+    pyscf_spin: int = 0
+    pyscf_coord_unit: str = "Angstrom"
     solver: SiestaSolverConfig = dataclasses.field(default_factory=SiestaSolverConfig)
 
 
@@ -506,6 +511,12 @@ class SiestaBlockWorkflow:
                 payload["predictive_ewf_closure"] = write_predictive_ewf_closure_manifest(self.config.workdir)
                 payload["cluster_hamiltonians"] = write_cluster_hamiltonians_manifest(self.config.workdir)
                 payload["ao_eri_contract"] = write_ao_eri_contract_manifest(self.config.workdir)
+                if self.config.pyscf_ao_mapping_mode == "auto":
+                    payload["pyscf_external_eri_workflow"] = run_configured_pyscf_external_eri_workflow(
+                        self.config.workdir,
+                        self.fdf,
+                        self.config,
+                    )
                 if self.config.ao_eri_npz_path is not None:
                     payload["cluster_two_electron_integrals"] = write_cluster_two_electron_integrals_from_ao_manifest(
                         self.config.workdir,
@@ -2005,6 +2016,134 @@ def run_pyscf_external_eri_workflow(
     return payload
 
 
+def run_configured_pyscf_external_eri_workflow(
+    workdir: str | os.PathLike[str],
+    fdf: FdfInput,
+    config: SiestaRunConfig,
+) -> dict:
+    """Run the environment-configured PySCF ERI path or write a diagnostic manifest."""
+
+    workdir = Path(workdir)
+    mapping_path = workdir / "pyscf_ao_mapping.json"
+    if config.pyscf_basis is None:
+        payload = _configured_pyscf_external_eri_failure_payload(
+            workdir,
+            stage="configuration",
+            reason="EWF_PYSCF_AO_MAPPING_MODE=auto requires EWF_PYSCF_BASIS",
+            config=config,
+        )
+        (workdir / "pyscf_external_eri_workflow.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        )
+        return payload
+    try:
+        mol = build_pyscf_mol_from_fdf(
+            fdf,
+            basis=config.pyscf_basis,
+            charge=config.pyscf_charge,
+            spin=config.pyscf_spin,
+            unit=config.pyscf_coord_unit,
+        )
+    except Exception as exc:
+        payload = _configured_pyscf_external_eri_failure_payload(
+            workdir,
+            stage="pyscf_molecule",
+            reason=f"Could not build PySCF molecule from FDF: {exc}",
+            config=config,
+        )
+        (workdir / "pyscf_external_eri_workflow.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        )
+        return payload
+    mapping = write_pyscf_ao_mapping_from_siesta_labels(
+        mol,
+        workdir / "ao_eri_contract.json",
+        mapping_path,
+    )
+    if mapping.get("ready") is not True:
+        payload = _configured_pyscf_external_eri_failure_payload(
+            workdir,
+            stage="pyscf_ao_mapping",
+            reason="PySCF AO labels did not match SIESTA AO records for every block",
+            config=config,
+            partial_results={"pyscf_ao_mapping": mapping},
+        )
+        (workdir / "pyscf_external_eri_workflow.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        )
+        write_physical_readiness_manifest(workdir)
+        return payload
+    return run_pyscf_external_eri_workflow(
+        workdir,
+        mol,
+        mapping_path,
+        energy_unit="hartree",
+        effective_interaction_u_ev=config.effective_interaction_u_ev,
+        denominator_shift_ev=config.effective_interaction_denominator_shift_ev,
+    )
+
+
+def build_pyscf_mol_from_fdf(
+    fdf: FdfInput,
+    basis: str,
+    charge: int = 0,
+    spin: int = 0,
+    unit: str = "Angstrom",
+) -> object:
+    """Build a PySCF molecule from the parsed FDF coordinates."""
+
+    try:
+        import pyscf.gto
+    except Exception as exc:
+        raise RuntimeError(f"PySCF is not importable: {exc}") from exc
+    atoms = []
+    for atom in fdf.atoms:
+        label = fdf.species_labels.get(atom.species)
+        if not label:
+            raise ValueError(f"FDF species {atom.species} has no ChemicalSpeciesLabel entry")
+        atoms.append((label, (float(atom.x), float(atom.y), float(atom.z))))
+    mol = pyscf.gto.Mole()
+    mol.atom = atoms
+    mol.basis = basis
+    mol.charge = int(charge)
+    mol.spin = int(spin)
+    mol.unit = unit
+    mol.verbose = 0
+    mol.build()
+    return mol
+
+
+def _configured_pyscf_external_eri_failure_payload(
+    workdir: Path,
+    stage: str,
+    reason: str,
+    config: SiestaRunConfig,
+    partial_results: dict | None = None,
+) -> dict:
+    return {
+        "version": 1,
+        "workflow_level": "pyscf-auto-mapping-external-eri-workflow-v1",
+        "stage": stage,
+        "ready": False,
+        "uses_reference_energy": False,
+        "uses_ab_initio_two_electron_integrals": False,
+        "ao_ordering_verified": False,
+        "mapping_mode": config.pyscf_ao_mapping_mode,
+        "pyscf_basis": config.pyscf_basis,
+        "pyscf_charge": config.pyscf_charge,
+        "pyscf_spin": config.pyscf_spin,
+        "pyscf_coord_unit": config.pyscf_coord_unit,
+        "artifacts": {
+            "ao_eri_contract": str(workdir / "ao_eri_contract.json"),
+            "pyscf_ao_mapping": str(workdir / "pyscf_ao_mapping.json"),
+            "embedded_observables": str(workdir / "embedded_observables.json"),
+            "physical_readiness": str(workdir / "physical_readiness.json"),
+        },
+        "blockers": [reason],
+        "partial_results": partial_results or {},
+    }
+
+
 def build_cluster_two_electron_integrals_from_ao(
     workdir: str | os.PathLike[str],
     ao_integrals_npz_path: str | os.PathLike[str],
@@ -2702,6 +2841,13 @@ def read_run_config(environ: dict[str, str] | None = None) -> SiestaRunConfig:
         ),
         ao_eri_npz_path=Path(environ["EWF_AO_ERI_NPZ"]) if environ.get("EWF_AO_ERI_NPZ") else None,
         ao_eri_energy_unit=environ.get("EWF_AO_ERI_ENERGY_UNIT") or None,
+        pyscf_ao_mapping_mode=_normalize_pyscf_ao_mapping_mode(
+            environ.get("EWF_PYSCF_AO_MAPPING_MODE", "off")
+        ),
+        pyscf_basis=environ.get("EWF_PYSCF_BASIS") or None,
+        pyscf_charge=int(environ.get("EWF_PYSCF_CHARGE", 0)),
+        pyscf_spin=int(environ.get("EWF_PYSCF_SPIN", 0)),
+        pyscf_coord_unit=environ.get("EWF_PYSCF_COORD_UNIT", "Angstrom"),
         solver=solver,
     )
 
@@ -5439,6 +5585,23 @@ def _normalize_energy_unit(unit: str) -> str:
     }
     if normalized not in aliases:
         raise ValueError(f"Unsupported AO integral energy unit: {unit}")
+    return aliases[normalized]
+
+
+def _normalize_pyscf_ao_mapping_mode(mode: str) -> str:
+    normalized = str(mode).strip().lower()
+    aliases = {
+        "0": "off",
+        "false": "off",
+        "no": "off",
+        "off": "off",
+        "1": "auto",
+        "true": "auto",
+        "yes": "auto",
+        "auto": "auto",
+    }
+    if normalized not in aliases:
+        raise ValueError("EWF_PYSCF_AO_MAPPING_MODE must be 'off' or 'auto'")
     return aliases[normalized]
 
 
