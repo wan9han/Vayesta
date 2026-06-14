@@ -1743,6 +1743,149 @@ def apply_pyscf_ao_mapping_to_contract(
     return contract
 
 
+def run_pyscf_external_eri_workflow(
+    workdir: str | os.PathLike[str],
+    mol: object,
+    mapping_path: str | os.PathLike[str],
+    energy_unit: str = "hartree",
+    effective_interaction_u_ev: float = 0.0,
+    denominator_shift_ev: float = 1.0e-6,
+) -> dict:
+    """Run the explicit PySCF AO ERI path and write a workflow manifest.
+
+    This is a contract-driven bridge for small verified smokes or environments
+    where a SIESTA-local AO ordering to PySCF AO ordering map is supplied
+    explicitly.  It does not infer that map.
+    """
+
+    workdir = Path(workdir)
+    mapping_path = Path(mapping_path)
+    manifest_path = workdir / "pyscf_external_eri_workflow.json"
+    blockers: list[str] = []
+    artifacts: dict[str, str] = {
+        "ao_eri_contract": str(workdir / "ao_eri_contract.json"),
+        "mapped_ao_eri_contract": str(workdir / "ao_eri_contract.pyscf_mapped.json"),
+        "pyscf_ao_eri_npz": str(workdir / "pyscf_ao_eri.npz"),
+        "pyscf_ao_eri_manifest": str(workdir / "pyscf_ao_eri.manifest.json"),
+        "cluster_two_electron_integrals": str(workdir / "cluster_two_electron_integrals.json"),
+        "effective_correlated_results": str(workdir / "effective_correlated_results.json"),
+        "embedded_observables": str(workdir / "embedded_observables.json"),
+        "physical_readiness": str(workdir / "physical_readiness.json"),
+    }
+
+    def _write_failure(stage: str, reason: str, partial: dict | None = None) -> dict:
+        payload = {
+            "version": 1,
+            "workflow_level": "pyscf-explicit-mapping-external-eri-workflow-v1",
+            "stage": stage,
+            "ready": False,
+            "uses_reference_energy": False,
+            "uses_ab_initio_two_electron_integrals": False,
+            "ao_ordering_verified": False,
+            "requested_energy_unit": _normalize_energy_unit(energy_unit),
+            "mapping_path": str(mapping_path),
+            "artifacts": artifacts,
+            "blockers": blockers + [reason],
+            "partial_results": partial or {},
+        }
+        manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        return payload
+
+    try:
+        contract = write_ao_eri_contract_manifest(workdir, energy_unit=energy_unit)
+        if contract.get("ready") is not True:
+            return _write_failure("ao_eri_contract", "AO ERI contract is not ready", {"ao_eri_contract": contract})
+        mapped_contract = apply_pyscf_ao_mapping_to_contract(
+            workdir / "ao_eri_contract.json",
+            mapping_path,
+            workdir / "ao_eri_contract.pyscf_mapped.json",
+        )
+        if mapped_contract.get("pyscf_ao_mapping_ready") is not True:
+            return _write_failure(
+                "pyscf_ao_mapping",
+                "PySCF AO mapping did not satisfy the AO ERI contract",
+                {"ao_eri_contract": contract, "mapped_ao_eri_contract": mapped_contract},
+            )
+        producer = write_pyscf_ao_eri_from_contract(
+            mol,
+            workdir / "ao_eri_contract.pyscf_mapped.json",
+            workdir / "pyscf_ao_eri.npz",
+            manifest_path=workdir / "pyscf_ao_eri.manifest.json",
+        )
+        if producer.get("ready") is not True:
+            return _write_failure(
+                "pyscf_ao_eri_producer",
+                "PySCF AO ERI producer did not write all requested block tensors",
+                {
+                    "ao_eri_contract": contract,
+                    "mapped_ao_eri_contract": mapped_contract,
+                    "pyscf_ao_eri_producer": producer,
+                },
+            )
+        tensors = write_cluster_two_electron_integrals_from_ao_manifest(
+            workdir,
+            workdir / "pyscf_ao_eri.npz",
+            energy_unit="hartree",
+        )
+        if tensors.get("ready") is not True:
+            return _write_failure(
+                "cluster_two_electron_integrals",
+                "AO ERI tensors could not be transformed into cluster two-electron integrals",
+                {
+                    "ao_eri_contract": contract,
+                    "mapped_ao_eri_contract": mapped_contract,
+                    "pyscf_ao_eri_producer": producer,
+                    "cluster_two_electron_integrals": tensors,
+                },
+            )
+        effective = write_effective_correlated_results_manifest(
+            workdir,
+            effective_interaction_u_ev=effective_interaction_u_ev,
+            denominator_shift_ev=denominator_shift_ev,
+        )
+        observables = write_embedded_observables_manifest(workdir)
+        readiness = write_physical_readiness_manifest(workdir)
+    except Exception as exc:
+        return _write_failure("exception", f"PySCF external ERI workflow failed: {exc}")
+
+    ready = bool(
+        producer.get("ready") is True
+        and tensors.get("ready") is True
+        and effective.get("ready") is True
+        and effective.get("uses_ab_initio_two_electron_integrals") is True
+        and effective.get("ao_ordering_verified") is True
+    )
+    if not ready:
+        blockers.append("Verified external AO ERI did not propagate to every effective correlated block")
+    payload = {
+        "version": 1,
+        "workflow_level": "pyscf-explicit-mapping-external-eri-workflow-v1",
+        "stage": "complete" if ready else "completed_with_unverified_outputs",
+        "ready": ready,
+        "uses_reference_energy": False,
+        "uses_ab_initio_two_electron_integrals": effective.get("uses_ab_initio_two_electron_integrals") is True,
+        "ao_ordering_verified": effective.get("ao_ordering_verified") is True,
+        "effective_energy_policy": observables.get("effective_energy_policy"),
+        "effective_embedded_total_energy_ev": observables.get("effective_embedded_total_energy_ev"),
+        "total_correlation_energy_ev": effective.get("total_correlation_energy_ev"),
+        "requested_energy_unit": _normalize_energy_unit(energy_unit),
+        "mapping_path": str(mapping_path),
+        "artifacts": artifacts,
+        "blockers": blockers,
+        "summary": {
+            "num_contract_blocks": contract.get("num_contract_blocks"),
+            "num_pyscf_eri_blocks": producer.get("num_written_blocks"),
+            "num_cluster_integral_blocks": tensors.get("num_written_blocks"),
+            "num_effective_solved_blocks": effective.get("num_solved_blocks"),
+            "physical_readiness_status": readiness.get("status"),
+            "production_predictive_physics_ready": readiness.get("production_predictive_physics_ready"),
+        },
+    }
+    manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    write_physical_readiness_manifest(workdir)
+    return payload
+
+
 def build_cluster_two_electron_integrals_from_ao(
     workdir: str | os.PathLike[str],
     ao_integrals_npz_path: str | os.PathLike[str],
@@ -3298,6 +3441,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     clusters = _read_optional_json(workdir / "cluster_hamiltonians.json") or {}
     ao_eri_contract = _read_optional_json(workdir / "ao_eri_contract.json") or {}
     pyscf_ao_mapping = _read_optional_json(workdir / "pyscf_ao_mapping.json") or {}
+    pyscf_external_eri_workflow = _read_optional_json(workdir / "pyscf_external_eri_workflow.json") or {}
     cluster_integrals = _read_optional_json(workdir / "cluster_two_electron_integrals.json") or {}
     cluster_solver = _read_optional_json(workdir / "cluster_solver_results.json") or {}
     effective = _read_optional_json(workdir / "effective_correlated_results.json") or {}
@@ -3345,6 +3489,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     pyscf_ao_mapping_ready = (
         ao_eri_contract.get("pyscf_ao_mapping_ready") is True or pyscf_ao_mapping.get("ready") is True
     )
+    pyscf_external_eri_workflow_ready = pyscf_external_eri_workflow.get("ready") is True
     cluster_two_electron_integrals_ready = cluster_integrals.get("ready") is True
     cluster_solver_ready = cluster_solver.get("ready") is True
     effective_correlated_ready = effective.get("ready") is True
@@ -3359,6 +3504,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
         "cluster_hamiltonians_ready": cluster_hamiltonians_ready,
         "ao_eri_contract_ready": ao_eri_contract_ready,
         "pyscf_ao_mapping_ready": pyscf_ao_mapping_ready,
+        "pyscf_external_eri_workflow_ready": pyscf_external_eri_workflow_ready,
         "cluster_two_electron_integrals_ready": cluster_two_electron_integrals_ready,
         "cluster_solver_results_ready": cluster_solver_ready,
         "effective_correlated_results_ready": effective_correlated_ready,
@@ -3418,6 +3564,11 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "pyscf_ao_mapping_blockers": ao_eri_contract.get(
                 "pyscf_ao_mapping_blockers", pyscf_ao_mapping.get("blockers")
             ),
+            "pyscf_external_eri_workflow_level": pyscf_external_eri_workflow.get("workflow_level"),
+            "pyscf_external_eri_workflow_ready": pyscf_external_eri_workflow_ready,
+            "pyscf_external_eri_workflow_stage": pyscf_external_eri_workflow.get("stage"),
+            "pyscf_external_eri_workflow_artifacts": pyscf_external_eri_workflow.get("artifacts"),
+            "pyscf_external_eri_workflow_blockers": pyscf_external_eri_workflow.get("blockers"),
             "cluster_two_electron_integrals_artifact_level": cluster_integrals.get("artifact_level"),
             "cluster_two_electron_integrals_source": cluster_integrals.get("source"),
             "cluster_two_electron_integrals_source_path": cluster_integrals.get("source_ao_integrals_npz_path"),

@@ -263,6 +263,14 @@ block artifacts:
   cannot be inferred safely.  `apply_pyscf_ao_mapping_to_contract()` injects a
   separate `pyscf_ao_mapping.json` into the contract after validating block
   dimensions and ordering fingerprints.
+- `pyscf_external_eri_workflow.json` is written by
+  `run_pyscf_external_eri_workflow()`.  It chains the explicit AO mapping,
+  PySCF `int2e` producer, AO-to-cluster transform, effective correlated
+  second-order solver, `embedded_observables.json`, and
+  `physical_readiness.json`.  This gives a single auditable manifest for the
+  verified external ERI smoke path; it still requires an explicit AO mapping
+  and does not make the second-order prototype a production correlated EWF
+  kernel.
 - `cluster_two_electron_integrals.json` can be generated from an external
   AO-basis ERI tensor with the same orbital ordering as the SIESTA-returned
   matrices.  It writes per-block `cluster_two_electron_integrals_block_XXXX.npz`
@@ -329,6 +337,7 @@ The public collection helpers are:
 - `write_ao_eri_contract_manifest(workdir, energy_unit="ev")`: write the per-block AO ERI producer contract and expected ordering fingerprints.
 - `apply_pyscf_ao_mapping_to_contract(contract_path, mapping_path, output_path=None)`: validate and inject explicit PySCF AO indices into the contract.
 - `write_pyscf_ao_eri_from_contract(mol, contract_path, output_path)`: write a PySCF `int2e` AO ERI NPZ following the contract when explicit `pyscf_ao_indices` are supplied.
+- `run_pyscf_external_eri_workflow(workdir, mol, mapping_path)`: run the explicit-mapping PySCF ERI smoke workflow through effective observables and readiness manifests.
 - `write_cluster_two_electron_integrals_from_ao_manifest(workdir, ao_integrals_npz_path, energy_unit=None)`: transform an external AO ERI tensor into per-block cluster eigenbasis `ovov` pair-coupling tensors.
 - `write_effective_correlated_results_manifest(workdir)`: compute the second-order effective-interaction correlation correction, using external `ovov` tensors when present and model U otherwise.
 - `write_effective_interaction_benchmark_scan_manifest(workdir, reference_observables, u_values_ev)`: quantify effective-interaction model response against a reference.

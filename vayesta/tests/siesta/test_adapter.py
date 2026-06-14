@@ -1833,6 +1833,97 @@ def test_pyscf_ao_eri_producer_reports_missing_ao_mapping(tmp_path):
     assert not output_path.exists()
 
 
+def test_pyscf_external_eri_workflow_propagates_verified_observables(tmp_path):
+    import pyscf.gto
+
+    mol = pyscf.gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g", verbose=0)
+    nao = mol.nao_nr()
+    block_dir = tmp_path / "block_0000"
+    block_dir.mkdir()
+    npz_path = block_dir / "cluster_hamiltonian_block_0000.npz"
+    np.savez_compressed(
+        npz_path,
+        basis_coefficients=np.eye(nao),
+        lowdin_orthogonalizer=np.eye(nao),
+        hamiltonian_orthogonalized=np.asarray([np.diag([1.0, 3.0])]),
+        density_orthogonalized=np.asarray([np.diag([2.0, 0.0])]),
+        overlap_orthogonalized=np.eye(nao),
+    )
+    block = {
+        "block_id": 0,
+        "npz_path": str(npz_path),
+        "cluster_basis_size": nao,
+        "orthogonalized_basis_size": nao,
+        "source_norbitals": nao,
+        "core_local_atoms": [0, 1],
+        "environment_local_atoms": [],
+    }
+    fingerprint = adapter._block_ao_ordering_fingerprint(block, nao)
+    (tmp_path / "cluster_hamiltonians.json").write_text(
+        json.dumps({"num_blocks": 1, "ready": True, "blocks": [block]})
+    )
+    (tmp_path / "cluster_solver_results.json").write_text(
+        json.dumps({"ready": True, "solver_level": "one-electron-lowdin-cluster-reference-v1"})
+    )
+    (tmp_path / "validation.json").write_text(json.dumps({"ok": True, "total_block_energy_ev": -10.0}))
+    (tmp_path / "boundary_corrections.json").write_text(
+        json.dumps({"closure_model": "unit-test", "corrections": [], "num_unparameterized_corrections": 0})
+    )
+    (tmp_path / "electron_constraint.json").write_text(
+        json.dumps(
+            {
+                "policy": "global_trace_shift_closure",
+                "chemical_potential_status": "applied",
+                "corrected_density_overlap_trace": 2.0,
+                "corrected_electron_count_deviation": 0.0,
+            }
+        )
+    )
+    (tmp_path / "global_matrices.json").write_text(json.dumps({"natoms": 2, "density_overlap_trace_total": 2.0}))
+    mapping_path = tmp_path / "pyscf_ao_mapping.json"
+    mapping_path.write_text(
+        json.dumps(
+            {
+                "ready": True,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "pyscf_ao_indices": list(range(nao)),
+                        "ao_ordering_fingerprint": fingerprint,
+                        "mapping_source": "unit-test-explicit-identity",
+                    }
+                ],
+            }
+        )
+    )
+
+    workflow = adapter.run_pyscf_external_eri_workflow(
+        tmp_path,
+        mol,
+        mapping_path,
+        denominator_shift_ev=0.0,
+    )
+    observables = json.loads((tmp_path / "embedded_observables.json").read_text())
+    readiness = json.loads((tmp_path / "physical_readiness.json").read_text())
+
+    assert workflow["ready"] is True
+    assert workflow["uses_ab_initio_two_electron_integrals"] is True
+    assert workflow["ao_ordering_verified"] is True
+    assert workflow["effective_energy_policy"] == "verified_external_eri_second_order_correction"
+    assert workflow["total_correlation_energy_ev"] < 0.0
+    assert observables["effective_energy_policy"] == "verified_external_eri_second_order_correction"
+    assert observables["effective_uses_ab_initio_two_electron_integrals"] is True
+    assert observables["effective_ao_ordering_verified"] is True
+    assert observables["effective_embedded_total_energy_ev"] == pytest.approx(
+        -10.0 + workflow["total_correlation_energy_ev"]
+    )
+    assert readiness["pyscf_external_eri_workflow_ready"] is True
+    assert readiness["cluster_two_electron_integrals_ready"] is True
+    assert readiness["effective_correlated_results_ready"] is True
+    assert readiness["diagnostic_outputs"]["pyscf_external_eri_workflow_ready"] is True
+    assert readiness["diagnostic_outputs"]["effective_ao_ordering_verified"] is True
+
+
 def test_cluster_two_electron_integral_transform_feeds_effective_solver(tmp_path):
     block_dir = tmp_path / "block_0000"
     block_dir.mkdir()
