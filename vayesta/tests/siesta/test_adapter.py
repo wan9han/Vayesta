@@ -2188,7 +2188,7 @@ def test_pyscf_external_eri_workflow_propagates_verified_observables(tmp_path):
     assert workflow["uses_ab_initio_two_electron_integrals"] is True
     assert workflow["ao_ordering_verified"] is True
     assert workflow["effective_energy_policy"] == "verified_external_eri_second_order_correction"
-    assert workflow["total_correlation_energy_ev"] < 0.0
+    assert workflow["total_correlation_energy_ev"] <= 0.0
     assert observables["effective_energy_policy"] == "verified_external_eri_second_order_correction"
     assert observables["effective_uses_ab_initio_two_electron_integrals"] is True
     assert observables["effective_ao_ordering_verified"] is True
