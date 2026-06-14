@@ -1706,6 +1706,7 @@ def attach_siesta_results_to_fragments(
     fragments: Sequence[object],
     results: Sequence[SiestaEwfResult],
     strict: bool = True,
+    predictive_ewf_closure: dict | None = None,
 ) -> list[object]:
     """Attach projected SIESTA EWF results to Vayesta fragments by block id."""
 
@@ -1735,6 +1736,8 @@ def attach_siesta_results_to_fragments(
         fragment.siesta_run_diagnostics = dict(result.run_diagnostics)
         fragment.siesta_core_atom_orbital_ranges = dict(result.core_atom_orbital_ranges)
         fragment.siesta_core_matrix_metadata = dict(result.core_matrix_metadata)
+        if predictive_ewf_closure:
+            _attach_predictive_ewf_closure_to_fragment(fragment, int(block_id), predictive_ewf_closure)
         attached.append(fragment)
     return attached
 
@@ -1755,7 +1758,13 @@ def load_siesta_results_to_fragments(
         require_converged=require_converged,
         require_matrices=require_matrices,
     )
-    return attach_siesta_results_to_fragments(fragments, results, strict=strict)
+    predictive_closure = _read_optional_json(Path(workdir) / "predictive_ewf_closure.json")
+    return attach_siesta_results_to_fragments(
+        fragments,
+        results,
+        strict=strict,
+        predictive_ewf_closure=predictive_closure,
+    )
 
 
 def read_run_config(environ: dict[str, str] | None = None) -> SiestaRunConfig:
@@ -3118,6 +3127,37 @@ def _read_closure_state(workdir_or_results) -> dict[str, bool]:
         "electron_constraint_applied": electron.get("chemical_potential_status") == "applied",
         "embedded_observables": bool(observables),
     }
+
+
+def _attach_predictive_ewf_closure_to_fragment(fragment: object, block_id: int, closure: dict) -> None:
+    bath_terms = [
+        dict(term)
+        for term in (closure.get("bath_construction") or {}).get("terms", [])
+        if int(term.get("block_id", -1)) == block_id
+    ]
+    potential_terms = [
+        dict(term)
+        for term in (closure.get("double_counting") or {}).get("terms", [])
+        if int(term.get("block_id", -1)) == block_id
+    ]
+    fragment.siesta_predictive_ewf_closure = {
+        "version": closure.get("version"),
+        "closure_level": closure.get("closure_level"),
+        "status": closure.get("status"),
+        "uses_reference_energy": closure.get("uses_reference_energy"),
+        "production_predictive_physics_ready": closure.get("production_predictive_physics_ready"),
+        "correlated_solver_status": closure.get("correlated_solver_status"),
+        "energy": dict(closure.get("energy") or {}),
+        "production_blockers": list(closure.get("production_blockers") or []),
+    }
+    fragment.siesta_predictive_bath_terms = bath_terms
+    fragment.siesta_embedding_potential_expectation_terms = potential_terms
+    fragment.siesta_predictive_ewf_closure_ready = closure.get("status") == "ready"
+    fragment.siesta_production_predictive_physics_ready = bool(closure.get("production_predictive_physics_ready"))
+    fragment.siesta_predictive_total_energy_ev = (closure.get("energy") or {}).get("predictive_total_energy_ev")
+    fragment.siesta_predictive_double_counting_energy_ev = (closure.get("energy") or {}).get(
+        "double_counting_energy_correction_ev"
+    )
 
 
 def _difference(value, reference) -> float | None:

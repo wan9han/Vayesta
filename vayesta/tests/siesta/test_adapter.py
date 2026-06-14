@@ -298,6 +298,38 @@ def test_load_siesta_results_to_fragments_projects_run_directory(tmp_path):
             ]
         )
     )
+    (tmp_path / "predictive_ewf_closure.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "closure_level": "predictive-mean-field-ewf-closure-v1",
+                "status": "ready",
+                "uses_reference_energy": False,
+                "production_predictive_physics_ready": False,
+                "correlated_solver_status": "not_run_mean_field_surrogate_only",
+                "bath_construction": {
+                    "terms": [
+                        {"block_id": 0, "core_atom": 0, "environment_atom": 1, "bath_rank": 1},
+                        {"block_id": 1, "core_atom": 2, "environment_atom": 3, "bath_rank": 1},
+                    ]
+                },
+                "double_counting": {
+                    "terms": [
+                        {
+                            "block_id": 0,
+                            "embedding_potential_expectation_ev": -0.25,
+                            "matched_entries": 4,
+                        }
+                    ]
+                },
+                "energy": {
+                    "predictive_total_energy_ev": -3.25,
+                    "double_counting_energy_correction_ev": 0.25,
+                },
+                "production_blockers": ["No correlated fragment solver has been run"],
+            }
+        )
+    )
     fragment = type("FakeFragment", (), {"siesta_block_id": 0})()
 
     attached = adapter.load_siesta_results_to_fragments(
@@ -312,6 +344,15 @@ def test_load_siesta_results_to_fragments_projects_run_directory(tmp_path):
     assert fragment.siesta_density_matrix_path == Path("x.DM")
     assert fragment.siesta_solver_metadata["solver_used"] == ["NTPOLY"]
     assert fragment.siesta_run_diagnostics["num_scf_steps"] == 13
+    assert fragment.siesta_predictive_ewf_closure_ready is True
+    assert fragment.siesta_production_predictive_physics_ready is False
+    assert fragment.siesta_predictive_total_energy_ev == -3.25
+    assert fragment.siesta_predictive_double_counting_energy_ev == 0.25
+    assert fragment.siesta_predictive_bath_terms == [
+        {"block_id": 0, "core_atom": 0, "environment_atom": 1, "bath_rank": 1}
+    ]
+    assert fragment.siesta_embedding_potential_expectation_terms[0]["matched_entries"] == 4
+    assert fragment.siesta_predictive_ewf_closure["correlated_solver_status"] == "not_run_mean_field_surrogate_only"
 
 
 def test_generate_block_directories(tmp_path):
