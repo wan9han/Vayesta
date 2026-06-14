@@ -850,6 +850,13 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
                 "ready": True,
                 "num_written_blocks": 1,
                 "uses_ab_initio_two_electron_integrals": True,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "ao_ordering_scope": "block_local_siesta_orbital_order",
+                        "ao_ordering_fingerprint": "a" * 64,
+                    }
+                ],
             }
         )
     )
@@ -910,6 +917,12 @@ def test_physical_readiness_reports_predictive_boundary_potential_not_self_consi
     assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_source_path"] == "/tmp/ao_eri.npz"
     assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_source_energy_unit"] == "hartree"
     assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_output_energy_unit"] == "ev"
+    assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_ao_ordering_scope"] == [
+        "block_local_siesta_orbital_order"
+    ]
+    assert payload["diagnostic_outputs"]["cluster_two_electron_integrals_ao_ordering_fingerprints"] == [
+        {"block_id": 0, "ao_ordering_fingerprint": "a" * 64}
+    ]
     assert payload["diagnostic_outputs"]["cluster_solver_ready"] is True
     assert payload["diagnostic_outputs"]["cluster_solver_num_solved_blocks"] == 1
     assert payload["diagnostic_outputs"]["cluster_solver_total_density_projected_one_electron_energy_ev"] == -2.0
@@ -1611,6 +1624,52 @@ def test_cluster_two_electron_integral_transform_feeds_effective_solver(tmp_path
     assert payload["uses_ab_initio_two_electron_integrals"] is True
     assert payload["total_correlation_energy_ev"] == pytest.approx(-(0.4**2) / 2.0)
     assert np.load(tensors["blocks"][0]["npz_path"])["ovov"].tolist() == [[[0.0, 0.4], [0.0, 0.0]]]
+
+
+def test_cluster_two_electron_integral_transform_supports_per_block_ao_eri(tmp_path):
+    blocks = []
+    for block_id, nao, coupling in [(0, 2, 0.2), (1, 3, 0.6)]:
+        block_dir = tmp_path / f"block_{block_id:04d}"
+        block_dir.mkdir()
+        npz_path = block_dir / f"cluster_hamiltonian_block_{block_id:04d}.npz"
+        np.savez_compressed(
+            npz_path,
+            basis_coefficients=np.eye(nao),
+            lowdin_orthogonalizer=np.eye(nao),
+            hamiltonian_orthogonalized=np.asarray([np.diag(np.arange(1, nao + 1, dtype=float))]),
+            density_orthogonalized=np.asarray([np.diag([2.0] + [0.0] * (nao - 1))]),
+            overlap_orthogonalized=np.eye(nao),
+        )
+        blocks.append(
+            {
+                "block_id": block_id,
+                "npz_path": str(npz_path),
+                "cluster_basis_size": nao,
+                "orthogonalized_basis_size": nao,
+                "source_norbitals": nao,
+                "core_local_atoms": [0],
+                "environment_local_atoms": [1],
+            }
+        )
+    ao0 = np.zeros((2, 2, 2, 2))
+    ao1 = np.zeros((3, 3, 3, 3))
+    ao0[0, 1, 0, 1] = 0.2
+    ao1[0, 2, 0, 2] = 0.6
+    ao_eri_path = tmp_path / "block_ao_eri.npz"
+    np.savez_compressed(ao_eri_path, ao_eri_block_0000=ao0, ao_eri_block_0001=ao1, energy_unit=np.asarray("ev"))
+    (tmp_path / "cluster_hamiltonians.json").write_text(
+        json.dumps({"num_blocks": 2, "ready": True, "blocks": blocks})
+    )
+
+    tensors = adapter.write_cluster_two_electron_integrals_from_ao_manifest(tmp_path, ao_eri_path)
+
+    assert tensors["ready"] is True
+    assert [block["ao_dimension"] for block in tensors["blocks"]] == [2, 3]
+    assert [block["ovov_shape"] for block in tensors["blocks"]] == [[1, 2, 2], [1, 3, 3]]
+    assert all(block["ao_ordering_scope"] == "block_local_siesta_orbital_order" for block in tensors["blocks"])
+    assert all(len(block["ao_ordering_fingerprint"]) == 64 for block in tensors["blocks"])
+    assert np.load(tensors["blocks"][0]["npz_path"])["ovov"][0, 0, 1] == pytest.approx(0.2)
+    assert np.load(tensors["blocks"][1]["npz_path"])["ovov"][0, 0, 2] == pytest.approx(0.6)
 
 
 def test_cluster_two_electron_integral_transform_records_input_failure(tmp_path):

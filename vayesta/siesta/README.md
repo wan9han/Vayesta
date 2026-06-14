@@ -260,6 +260,9 @@ block artifacts:
   files and updates `cluster_hamiltonians.json` with
   `two_electron_integrals_npz_path`.  The input NPZ may declare
   `energy_unit="hartree"` or `"ev"`; output `ovov` couplings are always eV.
+  Multi-block inputs can provide `ao_eri_block_XXXX` arrays so each local
+  SIESTA block can use its own AO dimension.  Each output block records a
+  block-local SIESTA AO-ordering fingerprint.
 - `effective_correlated_results.json` applies a second-order cluster
   correlation prototype.  By default it uses a configurable Hubbard-like model
   interaction and explicitly records that no ab-initio two-electron integrals
@@ -328,7 +331,9 @@ If `EWF_AO_ERI_NPZ=/path/to/ao_eri.npz` is set, `finalize()` also runs
 `write_cluster_two_electron_integrals_from_ao_manifest()` after cluster
 Hamiltonian construction.  `EWF_AO_ERI_ENERGY_UNIT` may be `ev` or `hartree`.
 Successful conversion causes the subsequent effective-correlated step to use
-external `ovov` tensors instead of the model U coupling.
+external `ovov` tensors instead of the model U coupling.  For weak-scaling runs
+with different local block sizes, use `ao_eri_block_0000`,
+`ao_eri_block_0001`, ... in the input NPZ.
 
 `SiestaEwfResult` is the first EWF-facing contract.  It keeps the local SIESTA
 matrix file paths and scalar status, but only assigns ownership to core atoms:

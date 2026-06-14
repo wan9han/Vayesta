@@ -8,6 +8,7 @@ mapping that an EWF fragment/backend can later consume directly.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import math
 import os
@@ -1614,9 +1615,10 @@ def build_cluster_two_electron_integrals_from_ao(
 ) -> dict:
     """Transform an external AO ERI tensor into block-local cluster eigenbasis couplings.
 
-    The input NPZ must contain ``ao_eri`` with shape ``(nao, nao, nao, nao)``
-    in the same AO ordering as the SIESTA-returned matrices.  The output NPZ
-    files contain an ``ovov`` pair-coupling matrix indexed by full cluster
+    The input NPZ must contain either ``ao_eri`` or per-block
+    ``ao_eri_block_XXXX`` arrays with shape ``(nao, nao, nao, nao)`` in the
+    same block-local AO ordering as the SIESTA-returned matrices.  The output
+    NPZ files contain an ``ovov`` pair-coupling matrix indexed by full cluster
     eigen-orbital ids; the effective-interaction solver consumes this as an
     external ab-initio/effective two-electron source.
     """
@@ -1626,15 +1628,12 @@ def build_cluster_two_electron_integrals_from_ao(
     clusters = _read_optional_json(workdir / "cluster_hamiltonians.json") or {}
     try:
         ao_data = np.load(ao_integrals_npz_path)
-        if "ao_eri" not in ao_data:
-            raise ValueError("AO integral NPZ must contain an ao_eri array")
-        ao_eri = np.asarray(ao_data["ao_eri"], dtype=float)
+        if "ao_eri" not in ao_data and not any(str(key).startswith("ao_eri_block_") for key in ao_data.files):
+            raise ValueError("AO integral NPZ must contain ao_eri or ao_eri_block_XXXX arrays")
         source_energy_unit = _normalize_energy_unit(
             energy_unit if energy_unit is not None else _npz_optional_scalar_string(ao_data, "energy_unit", "ev")
         )
-        ao_eri_ev = ao_eri * _energy_unit_to_ev_factor(source_energy_unit)
-        if ao_eri.ndim != 4 or len(set(ao_eri.shape)) != 1:
-            raise ValueError("ao_eri must have shape (nao, nao, nao, nao)")
+        energy_factor = _energy_unit_to_ev_factor(source_energy_unit)
     except Exception as exc:
         payload = _cluster_two_electron_integral_failure_payload(
             clusters,
@@ -1654,7 +1653,7 @@ def build_cluster_two_electron_integrals_from_ao(
         try:
             tensor_block = _write_cluster_two_electron_integrals_for_block(
                 block_copy,
-                ao_eri_ev,
+                _select_block_ao_eri(ao_data, block_copy, energy_factor),
                 source_path=ao_integrals_npz_path,
                 source_energy_unit=source_energy_unit,
             )
@@ -3242,6 +3241,17 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "cluster_two_electron_integrals_uses_ab_initio": cluster_integrals.get(
                 "uses_ab_initio_two_electron_integrals"
             ),
+            "cluster_two_electron_integrals_ao_ordering_scope": _unique_sorted_values(
+                block.get("ao_ordering_scope") for block in cluster_integrals.get("blocks", [])
+            ),
+            "cluster_two_electron_integrals_ao_ordering_fingerprints": [
+                {
+                    "block_id": block.get("block_id"),
+                    "ao_ordering_fingerprint": block.get("ao_ordering_fingerprint"),
+                }
+                for block in cluster_integrals.get("blocks", [])
+                if block.get("ao_ordering_fingerprint") is not None
+            ],
             "cluster_solver_level": cluster_solver.get("solver_level"),
             "cluster_solver_kind": cluster_solver.get("solver_kind"),
             "cluster_solver_ready": cluster_solver.get("ready"),
@@ -4629,12 +4639,15 @@ def _write_cluster_two_electron_integrals_for_block(
         ovov = np.einsum("pi,qa,ri,sa,pqrs->ia", c_eigen, c_eigen, c_eigen, c_eigen, ao_eri, optimize=True)
         ovov_by_spin.append(ovov)
     ovov_array = np.asarray(ovov_by_spin)
+    ordering_fingerprint = _block_ao_ordering_fingerprint(block, nao)
     np.savez_compressed(
         out_path,
         ovov=ovov_array,
         format=np.asarray("cluster-eigenbasis-full-pair-ovov-v1"),
         energy_unit=np.asarray("ev"),
         source_energy_unit=np.asarray(source_energy_unit),
+        ao_ordering_scope=np.asarray("block_local_siesta_orbital_order"),
+        ao_ordering_fingerprint=np.asarray(ordering_fingerprint),
         source_ao_integrals_npz_path=np.asarray(str(source_path)),
         cluster_hamiltonian_npz_path=np.asarray(str(npz_path)),
     )
@@ -4645,6 +4658,8 @@ def _write_cluster_two_electron_integrals_for_block(
         "source_ao_integrals_npz_path": str(source_path),
         "source_energy_unit": source_energy_unit,
         "output_energy_unit": "ev",
+        "ao_ordering_scope": "block_local_siesta_orbital_order",
+        "ao_ordering_fingerprint": ordering_fingerprint,
         "format": "cluster-eigenbasis-full-pair-ovov-v1",
         "ao_dimension": nao,
         "nspin": int(ovov_array.shape[0]),
@@ -4655,6 +4670,33 @@ def _write_cluster_two_electron_integrals_for_block(
     }
 
 
+def _select_block_ao_eri(arrays: object, block: dict, energy_factor: float) -> np.ndarray:
+    block_id = int(block["block_id"])
+    keys = (f"ao_eri_block_{block_id:04d}", f"ao_eri_block_{block_id}", "ao_eri")
+    for key in keys:
+        if key in arrays:
+            ao_eri = np.asarray(arrays[key], dtype=float)
+            if ao_eri.ndim != 4 or len(set(ao_eri.shape)) != 1:
+                raise ValueError(f"{key} must have shape (nao, nao, nao, nao)")
+            return ao_eri * float(energy_factor)
+    raise ValueError(f"AO integral NPZ has no ao_eri_block_{block_id:04d}, ao_eri_block_{block_id}, or ao_eri array")
+
+
+def _block_ao_ordering_fingerprint(block: dict, nao: int) -> str:
+    payload = {
+        "scope": "block_local_siesta_orbital_order",
+        "block_id": int(block["block_id"]),
+        "source_norbitals": int(block.get("source_norbitals", nao)),
+        "ao_dimension": int(nao),
+        "core_local_atoms": list(block.get("core_local_atoms", [])),
+        "environment_local_atoms": list(block.get("environment_local_atoms", [])),
+        "core_orbital_indices": list(block.get("core_orbital_indices", [])),
+        "environment_orbital_indices": list(block.get("environment_orbital_indices", [])),
+    }
+    text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _npz_optional_scalar_string(arrays: object, key: str, default: str) -> str:
     if key not in arrays:
         return default
@@ -4662,6 +4704,10 @@ def _npz_optional_scalar_string(arrays: object, key: str, default: str) -> str:
     if isinstance(value, np.ndarray):
         return str(value.item() if value.shape == () else value.tolist())
     return str(value)
+
+
+def _unique_sorted_values(values: Iterable[object]) -> list[object]:
+    return sorted({value for value in values if value is not None})
 
 
 def _normalize_energy_unit(unit: str) -> str:
