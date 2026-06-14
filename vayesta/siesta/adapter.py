@@ -1809,6 +1809,59 @@ def apply_pyscf_ao_mapping_to_contract(
     return contract
 
 
+def write_pyscf_ao_mapping_from_siesta_labels(
+    mol: object,
+    contract_path: str | os.PathLike[str],
+    output_path: str | os.PathLike[str],
+) -> dict:
+    """Write a conservative PySCF AO mapping from contract `siesta_ao_records`.
+
+    The matcher only accepts one-to-one labels by atom index, species, angular
+    momentum, magnetic component, and occurrence order.  Ambiguous or missing
+    labels become blockers.
+    """
+
+    contract_path = Path(contract_path)
+    output_path = Path(output_path)
+    contract = json.loads(contract_path.read_text())
+    pyscf_records = _pyscf_ao_label_records(mol)
+    blocks = []
+    blockers = []
+    for block in contract.get("blocks", []):
+        block_id = int(block.get("block_id", len(blocks)))
+        try:
+            siesta_records = block.get("siesta_ao_records", [])
+            if not siesta_records:
+                raise ValueError("contract block has no siesta_ao_records")
+            indices = _match_siesta_records_to_pyscf_indices(siesta_records, pyscf_records)
+            blocks.append(
+                {
+                    "block_id": block_id,
+                    "mapping_status": "matched_from_siesta_and_pyscf_ao_labels",
+                    "mapping_source": "siesta_ao_records_vs_pyscf_ao_labels",
+                    "pyscf_ao_indices": indices,
+                    "ao_ordering_fingerprint": block.get("ao_ordering_fingerprint"),
+                    "siesta_ao_ordering_fingerprint": block.get("siesta_ao_ordering_fingerprint"),
+                    "num_mapped_orbitals": len(indices),
+                    "ready": True,
+                }
+            )
+        except Exception as exc:
+            blockers.append(f"Block {block_id} PySCF AO label mapping failed: {exc}")
+    payload = {
+        "version": 1,
+        "mapping_level": "pyscf-ao-labels-from-siesta-orbital-index-v1",
+        "contract_path": str(contract_path),
+        "num_blocks": int(contract.get("num_blocks", len(contract.get("blocks", [])))),
+        "num_mapped_blocks": len(blocks),
+        "ready": len(blocks) == int(contract.get("num_blocks", len(contract.get("blocks", [])))) and not blockers,
+        "blockers": blockers,
+        "blocks": blocks,
+    }
+    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return payload
+
+
 def run_pyscf_external_eri_workflow(
     workdir: str | os.PathLike[str],
     mol: object,
@@ -5200,6 +5253,98 @@ def _validated_pyscf_ao_indices_for_contract_block(contract_block: dict, mapping
             f"mapping {provided_fingerprint}, contract {expected_fingerprint}"
         )
     return indices
+
+
+def _pyscf_ao_label_records(mol: object) -> list[dict]:
+    labels = mol.ao_labels(fmt=False)
+    records = []
+    for index, label in enumerate(labels):
+        try:
+            atom_index, species_label, nl_label, component = label
+        except ValueError:
+            raise ValueError(f"unsupported PySCF AO label format at index {index}: {label!r}")
+        angular_l = _pyscf_angular_l_from_nl_label(str(nl_label))
+        magnetic_m = _pyscf_magnetic_m_from_component(str(component), angular_l)
+        records.append(
+            {
+                "pyscf_ao_index": index,
+                "atom_index": int(atom_index),
+                "species_label": str(species_label),
+                "nl_label": str(nl_label),
+                "angular_l": angular_l,
+                "magnetic_m": magnetic_m,
+                "component": str(component),
+            }
+        )
+    return records
+
+
+def _match_siesta_records_to_pyscf_indices(siesta_records: Sequence[dict], pyscf_records: Sequence[dict]) -> list[int]:
+    pyscf_by_key: dict[tuple, list[int]] = {}
+    for record in pyscf_records:
+        key = (
+            record.get("atom_index"),
+            record.get("species_label"),
+            record.get("angular_l"),
+            record.get("magnetic_m"),
+        )
+        pyscf_by_key.setdefault(key, []).append(int(record["pyscf_ao_index"]))
+    used_by_key: dict[tuple, int] = {}
+    indices = []
+    for record in siesta_records:
+        global_atom = record.get("global_atom_index")
+        if global_atom is None:
+            raise ValueError(f"SIESTA AO record {record.get('orbital_index')} has no global_atom_index")
+        key = (
+            int(global_atom),
+            str(record.get("species_label")),
+            int(record.get("angular_l")),
+            int(record.get("magnetic_m")),
+        )
+        candidates = pyscf_by_key.get(key, [])
+        occurrence = used_by_key.get(key, 0)
+        if occurrence >= len(candidates):
+            raise ValueError(
+                "no PySCF AO candidate for "
+                f"atom/species/l/m occurrence {key} #{occurrence + 1}; "
+                f"available candidates={len(candidates)}"
+            )
+        indices.append(candidates[occurrence])
+        used_by_key[key] = occurrence + 1
+    if len(set(indices)) != len(indices):
+        raise ValueError("matched PySCF AO indices contain duplicates")
+    return indices
+
+
+def _pyscf_angular_l_from_nl_label(label: str) -> int:
+    match = re.search(r"([spdfgh])", label.lower())
+    if match is None:
+        raise ValueError(f"cannot infer angular momentum from PySCF AO label {label!r}")
+    return {"s": 0, "p": 1, "d": 2, "f": 3, "g": 4, "h": 5}[match.group(1)]
+
+
+def _pyscf_magnetic_m_from_component(component: str, angular_l: int) -> int:
+    component = component.strip().lower()
+    if angular_l == 0:
+        return 0
+    mapping = {
+        "px": 1,
+        "py": -1,
+        "pz": 0,
+        "x": 1,
+        "y": -1,
+        "z": 0,
+        "dxy": -2,
+        "dyz": -1,
+        "dz^2": 0,
+        "dz2": 0,
+        "dxz": 1,
+        "dx2-y2": 2,
+        "dx2": 2,
+    }
+    if component in mapping:
+        return mapping[component]
+    raise ValueError(f"cannot infer magnetic component from PySCF AO component {component!r}")
 
 
 def _pyscf_ao_eri_producer_failure_payload(contract: dict, output_path: Path, reason: str) -> dict:

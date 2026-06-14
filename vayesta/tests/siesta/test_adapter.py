@@ -1752,6 +1752,117 @@ def test_siesta_ao_ordering_manifest_exports_orbital_index_records_to_contract(t
     assert contract["blocks"][0]["siesta_ao_records"][2]["label"] == "g11:H:n1:l0:m0:zeta1:polF:syms"
 
 
+def test_pyscf_ao_mapping_from_siesta_labels_writes_contract_mapping(tmp_path):
+    import pyscf.gto
+
+    mol = pyscf.gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g", verbose=0)
+    block_dir = tmp_path / "block_0000"
+    block_dir.mkdir()
+    orbital_index_path = block_dir / "block_0000.ORB_INDX"
+    orbital_index_path.write_text(
+        "\n".join(
+            [
+                "io ia is spec iao n l m z p sym rc isc iuo",
+                "1 1 1 H 1 1 0 0 1 F s 4.743 0 0 0 1",
+                "2 2 1 H 1 1 0 0 1 F s 4.743 0 0 0 2",
+            ]
+        )
+    )
+    (tmp_path / "blocks.json").write_text(json.dumps([{"block_id": 0, "local_to_global_atom_index": [0, 1]}]))
+    (tmp_path / "results.json").write_text(json.dumps([{"block_id": 0, "orbital_index_path": str(orbital_index_path)}]))
+    npz_path = block_dir / "cluster_hamiltonian_block_0000.npz"
+    np.savez_compressed(
+        npz_path,
+        basis_coefficients=np.eye(2),
+        lowdin_orthogonalizer=np.eye(2),
+        hamiltonian_orthogonalized=np.asarray([np.diag([1.0, 2.0])]),
+        density_orthogonalized=np.asarray([np.diag([2.0, 0.0])]),
+        overlap_orthogonalized=np.eye(2),
+    )
+    (tmp_path / "cluster_hamiltonians.json").write_text(
+        json.dumps(
+            {
+                "num_blocks": 1,
+                "ready": True,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "npz_path": str(npz_path),
+                        "cluster_basis_size": 2,
+                        "orthogonalized_basis_size": 2,
+                        "source_norbitals": 2,
+                    }
+                ],
+            }
+        )
+    )
+    adapter.write_siesta_ao_ordering_manifest(tmp_path)
+    contract = adapter.write_ao_eri_contract_manifest(tmp_path)
+    mapping_path = tmp_path / "pyscf_ao_mapping.json"
+
+    mapping = adapter.write_pyscf_ao_mapping_from_siesta_labels(
+        mol,
+        tmp_path / "ao_eri_contract.json",
+        mapping_path,
+    )
+    mapped_contract = adapter.apply_pyscf_ao_mapping_to_contract(
+        tmp_path / "ao_eri_contract.json",
+        mapping_path,
+    )
+
+    assert mapping["ready"] is True
+    assert mapping["blocks"][0]["pyscf_ao_indices"] == [0, 1]
+    assert mapping["blocks"][0]["ao_ordering_fingerprint"] == contract["blocks"][0]["ao_ordering_fingerprint"]
+    assert mapped_contract["pyscf_ao_mapping_ready"] is True
+    assert mapped_contract["blocks"][0]["pyscf_ao_indices"] == [0, 1]
+
+
+def test_pyscf_ao_mapping_from_siesta_labels_reports_basis_mismatch(tmp_path):
+    import pyscf.gto
+
+    mol = pyscf.gto.M(atom="H 0 0 0", basis="sto-3g", spin=1, verbose=0)
+    contract_path = tmp_path / "ao_eri_contract.json"
+    contract_path.write_text(
+        json.dumps(
+            {
+                "num_blocks": 1,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "ao_ordering_fingerprint": "a" * 64,
+                        "siesta_ao_records": [
+                            {
+                                "orbital_index": 0,
+                                "global_atom_index": 0,
+                                "species_label": "H",
+                                "angular_l": 0,
+                                "magnetic_m": 0,
+                            },
+                            {
+                                "orbital_index": 1,
+                                "global_atom_index": 0,
+                                "species_label": "H",
+                                "angular_l": 0,
+                                "magnetic_m": 0,
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    mapping = adapter.write_pyscf_ao_mapping_from_siesta_labels(
+        mol,
+        contract_path,
+        tmp_path / "pyscf_ao_mapping.json",
+    )
+
+    assert mapping["ready"] is False
+    assert mapping["num_mapped_blocks"] == 0
+    assert "no PySCF AO candidate" in mapping["blockers"][0]
+
+
 def test_pyscf_ao_eri_producer_writes_contract_npz(tmp_path):
     import pyscf.gto
 

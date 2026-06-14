@@ -292,6 +292,11 @@ block artifacts:
   `ao_ordering_fingerprint_block_XXXX`, it must match the computed fingerprint;
   otherwise that block is rejected.  Missing fingerprints are allowed but
   marked `unverified_external_ordering`.
+- `write_pyscf_ao_mapping_from_siesta_labels()` can generate a conservative
+  `pyscf_ao_mapping.json` when the contract contains `siesta_ao_records` and
+  the PySCF molecule has matching AO labels.  It matches by atom index, species,
+  angular momentum, magnetic component, and occurrence order.  Basis mismatches
+  are reported as blockers rather than guessed.
 - `effective_correlated_results.json` applies a second-order cluster
   correlation prototype.  By default it uses a configurable Hubbard-like model
   interaction and explicitly records that no ab-initio two-electron integrals
@@ -345,6 +350,7 @@ The public collection helpers are:
 - `write_cluster_solver_results_manifest(workdir)`: solve the cluster Hamiltonian NPZ files with the one-electron reference solver.
 - `write_siesta_ao_ordering_manifest(workdir)`: parse block `ORB_INDX` files into structured AO labels and fingerprints.
 - `write_ao_eri_contract_manifest(workdir, energy_unit="ev")`: write the per-block AO ERI producer contract and expected ordering fingerprints.
+- `write_pyscf_ao_mapping_from_siesta_labels(mol, contract_path, output_path)`: generate a conservative PySCF AO mapping from contract `siesta_ao_records`.
 - `apply_pyscf_ao_mapping_to_contract(contract_path, mapping_path, output_path=None)`: validate and inject explicit PySCF AO indices into the contract.
 - `write_pyscf_ao_eri_from_contract(mol, contract_path, output_path)`: write a PySCF `int2e` AO ERI NPZ following the contract when explicit `pyscf_ao_indices` are supplied.
 - `run_pyscf_external_eri_workflow(workdir, mol, mapping_path)`: run the explicit-mapping PySCF ERI smoke workflow through effective observables and readiness manifests.
