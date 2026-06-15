@@ -285,6 +285,9 @@ block artifacts:
   production override is enabled.  It does not replace
   `effective_correlated_results.json`; both manifests are kept so downstream
   code can distinguish second-order and production correlated corrections.
+  `load_siesta_results_to_fragments()` now attaches both:
+  `siesta_effective_correlated_*` for the second-order path and
+  `siesta_production_correlated_*` for the production path.
 - `cluster_two_electron_integrals.json` can be generated from an external
   AO-basis ERI tensor with the same orbital ordering as the SIESTA-returned
   matrices.  It writes per-block `cluster_two_electron_integrals_block_XXXX.npz`

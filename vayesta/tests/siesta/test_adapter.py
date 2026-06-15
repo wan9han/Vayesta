@@ -402,6 +402,27 @@ def test_load_siesta_results_to_fragments_projects_run_directory(tmp_path):
             }
         )
     )
+    (tmp_path / "production_correlated_results.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "solver_level": "production-ccsd-v2",
+                "solver_kind": "ab_initio_ccsd",
+                "ready": True,
+                "correlated_solver_status": "production_ccsd_solved",
+                "uses_ab_initio_two_electron_integrals": True,
+                "ao_ordering_status": "verified",
+                "ao_ordering_verified": True,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "solver_status": "solved",
+                        "correlation_energy_ev": -0.2,
+                    }
+                ],
+            }
+        )
+    )
     fragment = type("FakeFragment", (), {"siesta_block_id": 0})()
 
     attached = adapter.load_siesta_results_to_fragments(
@@ -437,6 +458,10 @@ def test_load_siesta_results_to_fragments_projects_run_directory(tmp_path):
     assert fragment.siesta_effective_correlated_solver_status == "solved"
     assert fragment.siesta_effective_correlation_energy_ev == -0.125
     assert fragment.siesta_effective_correlated_manifest["uses_ab_initio_two_electron_integrals"] is False
+    assert fragment.siesta_production_correlated_results_ready is True
+    assert fragment.siesta_production_correlated_solver_status == "solved"
+    assert fragment.siesta_production_correlation_energy_ev == -0.2
+    assert fragment.siesta_production_correlated_manifest["solver_kind"] == "ab_initio_ccsd"
 
 
 def test_generate_block_directories(tmp_path):

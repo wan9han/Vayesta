@@ -2738,6 +2738,7 @@ def attach_siesta_results_to_fragments(
     cluster_hamiltonians: dict | None = None,
     cluster_solver_results: dict | None = None,
     effective_correlated_results: dict | None = None,
+    production_correlated_results: dict | None = None,
 ) -> list[object]:
     """Attach projected SIESTA EWF results to Vayesta fragments by block id."""
 
@@ -2775,6 +2776,8 @@ def attach_siesta_results_to_fragments(
             _attach_cluster_solver_result_to_fragment(fragment, int(block_id), cluster_solver_results)
         if effective_correlated_results:
             _attach_effective_correlated_result_to_fragment(fragment, int(block_id), effective_correlated_results)
+        if production_correlated_results:
+            _attach_production_correlated_result_to_fragment(fragment, int(block_id), production_correlated_results)
         attached.append(fragment)
     return attached
 
@@ -2799,6 +2802,7 @@ def load_siesta_results_to_fragments(
     cluster_hamiltonians = _read_optional_json(Path(workdir) / "cluster_hamiltonians.json")
     cluster_solver_results = _read_optional_json(Path(workdir) / "cluster_solver_results.json")
     effective_correlated_results = _read_optional_json(Path(workdir) / "effective_correlated_results.json")
+    production_correlated_results = _read_optional_json(Path(workdir) / "production_correlated_results.json")
     return attach_siesta_results_to_fragments(
         fragments,
         results,
@@ -2807,6 +2811,7 @@ def load_siesta_results_to_fragments(
         cluster_hamiltonians=cluster_hamiltonians,
         cluster_solver_results=cluster_solver_results,
         effective_correlated_results=effective_correlated_results,
+        production_correlated_results=production_correlated_results,
     )
 
 
@@ -4438,6 +4443,31 @@ def _attach_effective_correlated_result_to_fragment(fragment: object, block_id: 
     )
     fragment.siesta_effective_correlated_solver_status = None if block_result is None else block_result.get(
         "solver_status"
+    )
+
+
+def _attach_production_correlated_result_to_fragment(fragment: object, block_id: int, payload: dict) -> None:
+    block_result = next(
+        (dict(block) for block in payload.get("blocks", []) if int(block.get("block_id", -1)) == block_id),
+        None,
+    )
+    fragment.siesta_production_correlated_results_ready = payload.get("ready") is True
+    fragment.siesta_production_correlated_manifest = {
+        "version": payload.get("version"),
+        "solver_level": payload.get("solver_level"),
+        "solver_kind": payload.get("solver_kind"),
+        "ready": payload.get("ready"),
+        "correlated_solver_status": payload.get("correlated_solver_status"),
+        "uses_ab_initio_two_electron_integrals": payload.get("uses_ab_initio_two_electron_integrals"),
+        "ao_ordering_status": payload.get("ao_ordering_status"),
+        "ao_ordering_verified": payload.get("ao_ordering_verified"),
+    }
+    fragment.siesta_production_correlated_result = block_result
+    fragment.siesta_production_correlation_energy_ev = None if block_result is None else block_result.get(
+        "correlation_energy_ev"
+    )
+    fragment.siesta_production_correlated_solver_status = None if block_result is None else block_result.get(
+        "solver_status", payload.get("correlated_solver_status")
     )
 
 
