@@ -2282,6 +2282,7 @@ def test_production_solver_mp2_on_h2(tmp_path):
     result = adapter.solve_production_correlated_clusters(tmp_path, solver_type="mp2")
     assert result["ready"], f"MP2 not ready: {result.get('blockers')}"
     assert result["solver_kind"] == "ab_initio_mp2"
+    assert json.loads((tmp_path / "production_correlated_results.json").read_text()) == result
     e_corr = result["blocks"][0]["correlation_energy_hartree"]
     assert e_corr == pytest.approx(ref_mp2, abs=1e-10)
 
@@ -2311,7 +2312,7 @@ def test_embedded_observables_distinguish_production_mp2_policy(tmp_path):
         )
     )
     (tmp_path / "global_matrices.json").write_text(json.dumps({"density_overlap_trace_total": 2.0}))
-    (tmp_path / "effective_correlated_results.json").write_text(
+    (tmp_path / "production_correlated_results.json").write_text(
         json.dumps(
             {
                 "solver_level": "production-mp2-v2",
@@ -2328,6 +2329,7 @@ def test_embedded_observables_distinguish_production_mp2_policy(tmp_path):
 
     assert payload["effective_energy_policy"] == "verified_external_eri_mp2_correlation"
     assert payload["effective_embedded_total_energy_ev"] == pytest.approx(-10.25)
+    assert payload["selected_correlated_results_source"] == "production_correlated_results.json"
 
 
 def test_pyscf_external_eri_workflow_keeps_second_order_policy_by_default(tmp_path):
@@ -2474,11 +2476,60 @@ def test_pyscf_external_eri_workflow_production_mp2_policy(tmp_path):
         production_solver="mp2",
     )
     observables = json.loads((tmp_path / "embedded_observables.json").read_text())
+    effective = json.loads((tmp_path / "effective_correlated_results.json").read_text())
+    production = json.loads((tmp_path / "production_correlated_results.json").read_text())
 
     assert workflow["ready"] is True
     assert workflow["production_correlated_solver"] == "mp2"
+    assert workflow["production_correlated_results_ready"] is True
     assert workflow["effective_energy_policy"] == "verified_external_eri_mp2_correlation"
     assert observables["effective_energy_policy"] == "verified_external_eri_mp2_correlation"
+    assert observables["selected_correlated_results_source"] == "production_correlated_results.json"
+    assert effective["solver_level"] == "effective-interaction-second-order-cluster-v1"
+    assert production["solver_level"] == "production-mp2-v2"
+
+
+def test_physical_readiness_prefers_production_correlated_results_when_ready(tmp_path):
+    (tmp_path / "validation.json").write_text(json.dumps({"ok": True}))
+    (tmp_path / "embedding_contract.json").write_text(json.dumps({"num_pending_embedding_terms": 0}))
+    (tmp_path / "boundary_corrections.json").write_text(
+        json.dumps({"num_unparameterized_corrections": 0, "num_parameterized_corrections": 0})
+    )
+    (tmp_path / "electron_constraint.json").write_text(json.dumps({"chemical_potential_status": "applied"}))
+    (tmp_path / "embedded_observables.json").write_text(json.dumps({"embedded_total_energy_ev": -10.0}))
+    (tmp_path / "effective_correlated_results.json").write_text(
+        json.dumps(
+            {
+                "solver_level": "effective-interaction-second-order-cluster-v1",
+                "solver_kind": "ab_initio_effective_interaction_second_order",
+                "ready": True,
+                "ao_ordering_verified": True,
+                "uses_ab_initio_two_electron_integrals": True,
+                "total_correlation_energy_ev": -0.1,
+            }
+        )
+    )
+    (tmp_path / "production_correlated_results.json").write_text(
+        json.dumps(
+            {
+                "solver_level": "production-ccsd-v2",
+                "solver_kind": "ab_initio_ccsd",
+                "ready": True,
+                "ao_ordering_verified": True,
+                "ao_ordering_status": "verified",
+                "uses_ab_initio_two_electron_integrals": True,
+                "correlated_solver_status": "production_ccsd_solved",
+                "total_correlation_energy_ev": -0.2,
+            }
+        )
+    )
+
+    payload = adapter.build_physical_readiness_report(tmp_path)
+
+    assert payload["production_correlated_results_ready"] is True
+    assert payload["diagnostic_outputs"]["selected_correlated_results_source"] == "production_correlated_results.json"
+    assert payload["diagnostic_outputs"]["effective_correlated_solver_level"] == "production-ccsd-v2"
+    assert payload["diagnostic_outputs"]["production_correlated_solver_kind"] == "ab_initio_ccsd"
 
 
 def test_cluster_two_electron_integral_transform_feeds_effective_solver(tmp_path):

@@ -1901,6 +1901,7 @@ def run_pyscf_external_eri_workflow(
         "pyscf_ao_eri_manifest": str(workdir / "pyscf_ao_eri.manifest.json"),
         "cluster_two_electron_integrals": str(workdir / "cluster_two_electron_integrals.json"),
         "effective_correlated_results": str(workdir / "effective_correlated_results.json"),
+        "production_correlated_results": str(workdir / "production_correlated_results.json"),
         "embedded_observables": str(workdir / "embedded_observables.json"),
         "physical_readiness": str(workdir / "physical_readiness.json"),
     }
@@ -1975,11 +1976,10 @@ def run_pyscf_external_eri_workflow(
             effective_interaction_u_ev=effective_interaction_u_ev,
             denominator_shift_ev=denominator_shift_ev,
         )
+        production_result = None
         production_solver = _normalize_production_correlated_solver(production_solver)
         if production_solver != "off":
             production_result = solve_production_correlated_clusters(workdir, solver_type=production_solver)
-            if production_result.get("ready"):
-                effective = production_result
         observables = write_embedded_observables_manifest(workdir)
         readiness = write_physical_readiness_manifest(workdir)
     except Exception as exc:
@@ -2008,6 +2008,7 @@ def run_pyscf_external_eri_workflow(
         "requested_energy_unit": _normalize_energy_unit(energy_unit),
         "mapping_path": str(mapping_path),
         "production_correlated_solver": production_solver,
+        "production_correlated_results_ready": None if production_result is None else production_result.get("ready"),
         "artifacts": artifacts,
         "blockers": blockers,
         "summary": {
@@ -2015,6 +2016,7 @@ def run_pyscf_external_eri_workflow(
             "num_pyscf_eri_blocks": producer.get("num_written_blocks"),
             "num_cluster_integral_blocks": tensors.get("num_written_blocks"),
             "num_effective_solved_blocks": effective.get("num_solved_blocks"),
+            "num_production_solved_blocks": None if production_result is None else production_result.get("num_solved_blocks"),
             "physical_readiness_status": readiness.get("status"),
             "production_predictive_physics_ready": readiness.get("production_predictive_physics_ready"),
         },
@@ -3469,6 +3471,8 @@ def build_embedded_observables(workdir: str | os.PathLike[str]) -> dict:
     predictive_closure = _read_optional_json(workdir / "predictive_ewf_closure.json") or {}
     cluster_solver = _read_optional_json(workdir / "cluster_solver_results.json") or {}
     effective = _read_optional_json(workdir / "effective_correlated_results.json") or {}
+    production = _read_optional_json(workdir / "production_correlated_results.json") or {}
+    correlated = _selected_correlated_results(effective, production)
     energy_corrections = [
         float(correction.get("energy_correction_ev", 0.0))
         for correction in corrections.get("corrections", [])
@@ -3479,8 +3483,8 @@ def build_embedded_observables(workdir: str | os.PathLike[str]) -> dict:
     if total_block_energy is not None:
         total_energy = float(total_block_energy) + float(sum(energy_corrections))
     effective_total_energy = None
-    if total_energy is not None and effective.get("total_correlation_energy_ev") is not None:
-        effective_total_energy = float(total_energy) + float(effective["total_correlation_energy_ev"])
+    if total_energy is not None and correlated.get("total_correlation_energy_ev") is not None:
+        effective_total_energy = float(total_energy) + float(correlated["total_correlation_energy_ev"])
     return {
         "version": 1,
         "observable_level": "minimal-embedded-closure",
@@ -3514,17 +3518,22 @@ def build_embedded_observables(workdir: str | os.PathLike[str]) -> dict:
             "total_aufbau_one_electron_energy_ev"
         ),
         "cluster_solver_correlated_status": cluster_solver.get("correlated_solver_status"),
-        "effective_correlated_solver_level": effective.get("solver_level"),
-        "effective_correlated_solver_kind": effective.get("solver_kind"),
-        "effective_correlated_results_ready": effective.get("ready"),
-        "effective_correlation_energy_ev": effective.get("total_correlation_energy_ev"),
+        "effective_correlated_solver_level": correlated.get("solver_level"),
+        "effective_correlated_solver_kind": correlated.get("solver_kind"),
+        "effective_correlated_results_ready": correlated.get("ready"),
+        "effective_correlation_energy_ev": correlated.get("total_correlation_energy_ev"),
         "effective_embedded_total_energy_ev": effective_total_energy,
-        "effective_energy_policy": _effective_energy_policy(effective),
-        "effective_uses_ab_initio_two_electron_integrals": effective.get("uses_ab_initio_two_electron_integrals"),
-        "effective_ao_ordering_status": effective.get("ao_ordering_status"),
-        "effective_ao_ordering_verified": effective.get("ao_ordering_verified"),
-        "effective_correlated_status": effective.get("correlated_solver_status"),
-        "effective_interaction_u_ev": effective.get("effective_interaction_u_ev"),
+        "effective_energy_policy": _effective_energy_policy(correlated),
+        "effective_uses_ab_initio_two_electron_integrals": correlated.get("uses_ab_initio_two_electron_integrals"),
+        "effective_ao_ordering_status": correlated.get("ao_ordering_status"),
+        "effective_ao_ordering_verified": correlated.get("ao_ordering_verified"),
+        "effective_correlated_status": correlated.get("correlated_solver_status"),
+        "effective_interaction_u_ev": correlated.get("effective_interaction_u_ev"),
+        "selected_correlated_results_source": _selected_correlated_results_source(effective, production),
+        "production_correlated_solver_level": production.get("solver_level"),
+        "production_correlated_solver_kind": production.get("solver_kind"),
+        "production_correlated_results_ready": production.get("ready"),
+        "production_correlation_energy_ev": production.get("total_correlation_energy_ev"),
     }
 
 
@@ -3714,7 +3723,9 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     cluster_integrals = _read_optional_json(workdir / "cluster_two_electron_integrals.json") or {}
     cluster_solver = _read_optional_json(workdir / "cluster_solver_results.json") or {}
     effective = _read_optional_json(workdir / "effective_correlated_results.json") or {}
+    production = _read_optional_json(workdir / "production_correlated_results.json") or {}
     effective_scan = _read_optional_json(workdir / "effective_interaction_benchmark_scan.json") or {}
+    correlated = _selected_correlated_results(effective, production)
 
     backend_ready = bool(validation.get("ok"))
     blockers = []
@@ -3763,6 +3774,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
     cluster_two_electron_integrals_ready = cluster_integrals.get("ready") is True
     cluster_solver_ready = cluster_solver.get("ready") is True
     effective_correlated_ready = effective.get("ready") is True
+    production_correlated_ready = production.get("ready") is True
     return {
         "version": 1,
         "backend_artifacts_ready": backend_ready,
@@ -3779,6 +3791,7 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
         "cluster_two_electron_integrals_ready": cluster_two_electron_integrals_ready,
         "cluster_solver_results_ready": cluster_solver_ready,
         "effective_correlated_results_ready": effective_correlated_ready,
+        "production_correlated_results_ready": production_correlated_ready,
         "effective_interaction_benchmark_scan_ready": bool(effective_scan),
         "production_predictive_physics_ready": bool(predictive_closure.get("production_predictive_physics_ready")),
         "benchmark_manifest_ready": benchmark_manifest_ready,
@@ -3877,18 +3890,24 @@ def build_physical_readiness_report(workdir: str | os.PathLike[str]) -> dict:
             "cluster_solver_total_aufbau_one_electron_energy_ev": cluster_solver.get(
                 "total_aufbau_one_electron_energy_ev"
             ),
-            "effective_correlated_solver_level": effective.get("solver_level"),
-            "effective_correlated_solver_kind": effective.get("solver_kind"),
-            "effective_correlated_ready": effective.get("ready"),
-            "effective_correlated_status": effective.get("correlated_solver_status"),
-            "effective_interaction_u_ev": effective.get("effective_interaction_u_ev"),
-            "effective_correlation_energy_ev": effective.get("total_correlation_energy_ev"),
-            "effective_uses_ab_initio_two_electron_integrals": effective.get(
+            "effective_correlated_solver_level": correlated.get("solver_level"),
+            "effective_correlated_solver_kind": correlated.get("solver_kind"),
+            "effective_correlated_ready": correlated.get("ready"),
+            "effective_correlated_status": correlated.get("correlated_solver_status"),
+            "effective_interaction_u_ev": correlated.get("effective_interaction_u_ev"),
+            "effective_correlation_energy_ev": correlated.get("total_correlation_energy_ev"),
+            "effective_uses_ab_initio_two_electron_integrals": correlated.get(
                 "uses_ab_initio_two_electron_integrals"
             ),
-            "effective_ao_ordering_status": effective.get("ao_ordering_status"),
-            "effective_ao_ordering_verified": effective.get("ao_ordering_verified"),
-            "effective_ao_ordering_block_statuses": effective.get("ao_ordering_block_statuses"),
+            "effective_ao_ordering_status": correlated.get("ao_ordering_status"),
+            "effective_ao_ordering_verified": correlated.get("ao_ordering_verified"),
+            "effective_ao_ordering_block_statuses": correlated.get("ao_ordering_block_statuses"),
+            "selected_correlated_results_source": _selected_correlated_results_source(effective, production),
+            "production_correlated_solver_level": production.get("solver_level"),
+            "production_correlated_solver_kind": production.get("solver_kind"),
+            "production_correlated_ready": production.get("ready"),
+            "production_correlated_status": production.get("correlated_solver_status"),
+            "production_correlation_energy_ev": production.get("total_correlation_energy_ev"),
             "effective_interaction_scan_status": effective_scan.get("status"),
             "effective_interaction_scan_best_u_ev": (effective_scan.get("best_sample") or {}).get(
                 "effective_interaction_u_ev"
@@ -5639,6 +5658,20 @@ def _effective_energy_policy(effective: dict) -> str | None:
     return "model_effective_interaction_second_order_correction"
 
 
+def _selected_correlated_results(effective: dict, production: dict) -> dict:
+    if production.get("ready") is True:
+        return production
+    return effective
+
+
+def _selected_correlated_results_source(effective: dict, production: dict) -> str | None:
+    if production.get("ready") is True:
+        return "production_correlated_results.json"
+    if effective:
+        return "effective_correlated_results.json"
+    return None
+
+
 def _energy_unit_to_ev_factor(unit: str) -> float:
     normalized = _normalize_energy_unit(unit)
     if normalized == "ev":
@@ -6723,7 +6756,7 @@ def solve_production_correlated_clusters(
         "blocks": blocks,
     }
 
-    (workdir / "effective_correlated_results.json").write_text(
+    (workdir / "production_correlated_results.json").write_text(
         json.dumps(payload, indent=2) + "\n"
     )
     return payload
