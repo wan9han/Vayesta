@@ -2296,6 +2296,191 @@ def test_production_solver_ccsd_on_h2(tmp_path):
     assert e_corr == pytest.approx(ref_ccsd, abs=1e-7)
 
 
+def test_embedded_observables_distinguish_production_mp2_policy(tmp_path):
+    (tmp_path / "validation.json").write_text(json.dumps({"total_block_energy_ev": -10.0}))
+    (tmp_path / "boundary_corrections.json").write_text(json.dumps({"corrections": [], "closure_model": "unit-test"}))
+    (tmp_path / "electron_constraint.json").write_text(
+        json.dumps(
+            {
+                "policy": "global_trace_shift_closure",
+                "target_valence_electrons": 2.0,
+                "observed_density_overlap_trace": 2.0,
+                "corrected_density_overlap_trace": 2.0,
+                "corrected_electron_count_deviation": 0.0,
+            }
+        )
+    )
+    (tmp_path / "global_matrices.json").write_text(json.dumps({"density_overlap_trace_total": 2.0}))
+    (tmp_path / "effective_correlated_results.json").write_text(
+        json.dumps(
+            {
+                "solver_level": "production-mp2-v2",
+                "solver_kind": "ab_initio_mp2",
+                "ready": True,
+                "uses_ab_initio_two_electron_integrals": True,
+                "ao_ordering_verified": True,
+                "total_correlation_energy_ev": -0.25,
+            }
+        )
+    )
+
+    payload = adapter.write_embedded_observables_manifest(tmp_path)
+
+    assert payload["effective_energy_policy"] == "verified_external_eri_mp2_correlation"
+    assert payload["effective_embedded_total_energy_ev"] == pytest.approx(-10.25)
+
+
+def test_pyscf_external_eri_workflow_keeps_second_order_policy_by_default(tmp_path):
+    import pyscf.gto
+
+    mol = pyscf.gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g", verbose=0)
+    nao = mol.nao_nr()
+    block_dir = tmp_path / "block_0000"
+    block_dir.mkdir()
+    npz_path = block_dir / "cluster_hamiltonian_block_0000.npz"
+    np.savez_compressed(
+        npz_path,
+        basis_coefficients=np.eye(nao),
+        lowdin_orthogonalizer=np.eye(nao),
+        hamiltonian_orthogonalized=np.asarray([np.diag([1.0, 3.0])]),
+        density_orthogonalized=np.asarray([np.diag([2.0, 0.0])]),
+        overlap_orthogonalized=np.eye(nao),
+    )
+    block = {
+        "block_id": 0,
+        "npz_path": str(npz_path),
+        "cluster_basis_size": nao,
+        "orthogonalized_basis_size": nao,
+        "source_norbitals": nao,
+        "core_local_atoms": [0, 1],
+        "environment_local_atoms": [],
+    }
+    fingerprint = adapter._block_ao_ordering_fingerprint(block, nao)
+    (tmp_path / "cluster_hamiltonians.json").write_text(json.dumps({"num_blocks": 1, "ready": True, "blocks": [block]}))
+    (tmp_path / "cluster_solver_results.json").write_text(
+        json.dumps({"ready": True, "solver_level": "one-electron-lowdin-cluster-reference-v1"})
+    )
+    (tmp_path / "validation.json").write_text(json.dumps({"ok": True, "total_block_energy_ev": -10.0}))
+    (tmp_path / "boundary_corrections.json").write_text(
+        json.dumps({"closure_model": "unit-test", "corrections": [], "num_unparameterized_corrections": 0})
+    )
+    (tmp_path / "electron_constraint.json").write_text(
+        json.dumps(
+            {
+                "policy": "global_trace_shift_closure",
+                "chemical_potential_status": "applied",
+                "corrected_density_overlap_trace": 2.0,
+                "corrected_electron_count_deviation": 0.0,
+            }
+        )
+    )
+    (tmp_path / "global_matrices.json").write_text(json.dumps({"natoms": 2, "density_overlap_trace_total": 2.0}))
+    mapping_path = tmp_path / "pyscf_ao_mapping.json"
+    mapping_path.write_text(
+        json.dumps(
+            {
+                "ready": True,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "pyscf_ao_indices": list(range(nao)),
+                        "ao_ordering_fingerprint": fingerprint,
+                        "mapping_source": "unit-test-explicit-identity",
+                    }
+                ],
+            }
+        )
+    )
+
+    workflow = adapter.run_pyscf_external_eri_workflow(tmp_path, mol, mapping_path, denominator_shift_ev=0.0)
+
+    assert workflow["ready"] is True
+    assert workflow["production_correlated_solver"] == "off"
+    assert workflow["effective_energy_policy"] == "verified_external_eri_second_order_correction"
+
+
+def test_pyscf_external_eri_workflow_production_mp2_policy(tmp_path):
+    import pyscf.gto
+
+    mol = pyscf.gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g", verbose=0)
+    nao = mol.nao_nr()
+    block_dir = tmp_path / "block_0000"
+    block_dir.mkdir()
+    npz_path = block_dir / "cluster_hamiltonian_block_0000.npz"
+    overlap = mol.intor("int1e_ovlp")
+    hcore = np.diag([-1.0, 0.5])
+    density = np.diag([2.0, 0.0])
+    np.savez_compressed(
+        npz_path,
+        basis_coefficients=np.eye(nao),
+        lowdin_orthogonalizer=np.eye(nao),
+        hamiltonian_orthogonalized=np.asarray([hcore]),
+        density_orthogonalized=np.asarray([density]),
+        overlap_orthogonalized=np.eye(nao),
+        overlap_cluster=overlap,
+        hamiltonian_cluster=np.asarray([hcore]),
+    )
+    block = {
+        "block_id": 0,
+        "npz_path": str(npz_path),
+        "cluster_basis_size": nao,
+        "orthogonalized_basis_size": nao,
+        "source_norbitals": nao,
+        "core_local_atoms": [0, 1],
+        "environment_local_atoms": [],
+    }
+    fingerprint = adapter._block_ao_ordering_fingerprint(block, nao)
+    (tmp_path / "cluster_hamiltonians.json").write_text(json.dumps({"num_blocks": 1, "ready": True, "blocks": [block]}))
+    (tmp_path / "cluster_solver_results.json").write_text(
+        json.dumps({"ready": True, "solver_level": "one-electron-lowdin-cluster-reference-v1"})
+    )
+    (tmp_path / "validation.json").write_text(json.dumps({"ok": True, "total_block_energy_ev": -10.0}))
+    (tmp_path / "boundary_corrections.json").write_text(
+        json.dumps({"closure_model": "unit-test", "corrections": [], "num_unparameterized_corrections": 0})
+    )
+    (tmp_path / "electron_constraint.json").write_text(
+        json.dumps(
+            {
+                "policy": "global_trace_shift_closure",
+                "chemical_potential_status": "applied",
+                "corrected_density_overlap_trace": 2.0,
+                "corrected_electron_count_deviation": 0.0,
+            }
+        )
+    )
+    (tmp_path / "global_matrices.json").write_text(json.dumps({"natoms": 2, "density_overlap_trace_total": 2.0}))
+    mapping_path = tmp_path / "pyscf_ao_mapping.json"
+    mapping_path.write_text(
+        json.dumps(
+            {
+                "ready": True,
+                "blocks": [
+                    {
+                        "block_id": 0,
+                        "pyscf_ao_indices": list(range(nao)),
+                        "ao_ordering_fingerprint": fingerprint,
+                        "mapping_source": "unit-test-explicit-identity",
+                    }
+                ],
+            }
+        )
+    )
+
+    workflow = adapter.run_pyscf_external_eri_workflow(
+        tmp_path,
+        mol,
+        mapping_path,
+        denominator_shift_ev=0.0,
+        production_solver="mp2",
+    )
+    observables = json.loads((tmp_path / "embedded_observables.json").read_text())
+
+    assert workflow["ready"] is True
+    assert workflow["production_correlated_solver"] == "mp2"
+    assert workflow["effective_energy_policy"] == "verified_external_eri_mp2_correlation"
+    assert observables["effective_energy_policy"] == "verified_external_eri_mp2_correlation"
+
+
 def test_cluster_two_electron_integral_transform_feeds_effective_solver(tmp_path):
     block_dir = tmp_path / "block_0000"
     block_dir.mkdir()
@@ -2598,6 +2783,7 @@ def test_read_run_config_from_environment(tmp_path):
             "EWF_PYSCF_CHARGE": "1",
             "EWF_PYSCF_SPIN": "1",
             "EWF_PYSCF_COORD_UNIT": "Bohr",
+            "EWF_PRODUCTION_CORRELATED_SOLVER": "ccsd",
         }
     )
 
@@ -2624,6 +2810,7 @@ def test_read_run_config_from_environment(tmp_path):
     assert config.pyscf_charge == 1
     assert config.pyscf_spin == 1
     assert config.pyscf_coord_unit == "Bohr"
+    assert config.production_correlated_solver == "ccsd"
     assert config.solver.ntpoly_method == 2
     assert config.solver.ntpoly_filter == 1.0e-8
     assert config.solver.ntpoly_tolerance == 1.0e-5

@@ -148,6 +148,7 @@ class SiestaRunConfig:
     pyscf_charge: int = 0
     pyscf_spin: int = 0
     pyscf_coord_unit: str = "Angstrom"
+    production_correlated_solver: str = "off"
     solver: SiestaSolverConfig = dataclasses.field(default_factory=SiestaSolverConfig)
 
 
@@ -1880,7 +1881,7 @@ def run_pyscf_external_eri_workflow(
     energy_unit: str = "hartree",
     effective_interaction_u_ev: float = 0.0,
     denominator_shift_ev: float = 1.0e-6,
-    production_solver: str = "mp2",
+    production_solver: str = "off",
 ) -> dict:
     """Run the explicit PySCF AO ERI path and write a workflow manifest.
 
@@ -1974,16 +1975,11 @@ def run_pyscf_external_eri_workflow(
             effective_interaction_u_ev=effective_interaction_u_ev,
             denominator_shift_ev=denominator_shift_ev,
         )
-        
-        # New production solver override
-        production_solver = solve_production_correlated_clusters(workdir, solver_type=production_solver)
-        if production_solver.get("ready"):
-            effective = production_solver
-            # Since the structure is slightly different, ensure ao_ordering_verified is passed through
-            effective["ao_ordering_verified"] = True
-            effective["uses_ab_initio_two_electron_integrals"] = True
-            effective["num_solved_blocks"] = production_solver.get("num_solved_blocks", 0)
-            
+        production_solver = _normalize_production_correlated_solver(production_solver)
+        if production_solver != "off":
+            production_result = solve_production_correlated_clusters(workdir, solver_type=production_solver)
+            if production_result.get("ready"):
+                effective = production_result
         observables = write_embedded_observables_manifest(workdir)
         readiness = write_physical_readiness_manifest(workdir)
     except Exception as exc:
@@ -2011,6 +2007,7 @@ def run_pyscf_external_eri_workflow(
         "total_correlation_energy_ev": effective.get("total_correlation_energy_ev"),
         "requested_energy_unit": _normalize_energy_unit(energy_unit),
         "mapping_path": str(mapping_path),
+        "production_correlated_solver": production_solver,
         "artifacts": artifacts,
         "blockers": blockers,
         "summary": {
@@ -2091,6 +2088,7 @@ def run_configured_pyscf_external_eri_workflow(
         energy_unit="hartree",
         effective_interaction_u_ev=config.effective_interaction_u_ev,
         denominator_shift_ev=config.effective_interaction_denominator_shift_ev,
+        production_solver=config.production_correlated_solver,
     )
 
 
@@ -2859,6 +2857,9 @@ def read_run_config(environ: dict[str, str] | None = None) -> SiestaRunConfig:
         pyscf_charge=int(environ.get("EWF_PYSCF_CHARGE", 0)),
         pyscf_spin=int(environ.get("EWF_PYSCF_SPIN", 0)),
         pyscf_coord_unit=environ.get("EWF_PYSCF_COORD_UNIT", "Angstrom"),
+        production_correlated_solver=_normalize_production_correlated_solver(
+            environ.get("EWF_PRODUCTION_CORRELATED_SOLVER", "off")
+        ),
         solver=solver,
     )
 
@@ -3518,16 +3519,7 @@ def build_embedded_observables(workdir: str | os.PathLike[str]) -> dict:
         "effective_correlated_results_ready": effective.get("ready"),
         "effective_correlation_energy_ev": effective.get("total_correlation_energy_ev"),
         "effective_embedded_total_energy_ev": effective_total_energy,
-        "effective_energy_policy": (
-            "verified_external_eri_second_order_correction"
-            if effective.get("uses_ab_initio_two_electron_integrals") is True
-            and effective.get("ao_ordering_verified") is True
-            else "unverified_external_eri_second_order_correction"
-            if effective.get("uses_ab_initio_two_electron_integrals") is True
-            else "model_effective_interaction_second_order_correction"
-            if effective
-            else None
-        ),
+        "effective_energy_policy": _effective_energy_policy(effective),
         "effective_uses_ab_initio_two_electron_integrals": effective.get("uses_ab_initio_two_electron_integrals"),
         "effective_ao_ordering_status": effective.get("ao_ordering_status"),
         "effective_ao_ordering_verified": effective.get("ao_ordering_verified"),
@@ -5616,6 +5608,37 @@ def _normalize_pyscf_ao_mapping_mode(mode: str) -> str:
     return aliases[normalized]
 
 
+def _normalize_production_correlated_solver(solver: str) -> str:
+    normalized = str(solver).strip().lower()
+    aliases = {
+        "0": "off",
+        "false": "off",
+        "no": "off",
+        "off": "off",
+        "none": "off",
+        "mp2": "mp2",
+        "ccsd": "ccsd",
+    }
+    if normalized not in aliases:
+        raise ValueError("EWF_PRODUCTION_CORRELATED_SOLVER must be one of: off, mp2, ccsd")
+    return aliases[normalized]
+
+
+def _effective_energy_policy(effective: dict) -> str | None:
+    if not effective:
+        return None
+    solver_level = str(effective.get("solver_level") or "")
+    if solver_level.startswith("production-mp2"):
+        return "verified_external_eri_mp2_correlation"
+    if solver_level.startswith("production-ccsd"):
+        return "verified_external_eri_ccsd_correlation"
+    if effective.get("uses_ab_initio_two_electron_integrals") is True and effective.get("ao_ordering_verified") is True:
+        return "verified_external_eri_second_order_correction"
+    if effective.get("uses_ab_initio_two_electron_integrals") is True:
+        return "unverified_external_eri_second_order_correction"
+    return "model_effective_interaction_second_order_correction"
+
+
 def _energy_unit_to_ev_factor(unit: str) -> float:
     normalized = _normalize_energy_unit(unit)
     if normalized == "ev":
@@ -6690,6 +6713,9 @@ def solve_production_correlated_clusters(
         "solver_kind": f"ab_initio_{solver_type}",
         "uses_ab_initio_two_electron_integrals": True,
         "ao_ordering_verified": True,
+        "ao_ordering_status": "verified",
+        "correlated_solver_status": f"production_{solver_type}_solved" if not blockers else f"production_{solver_type}_failed",
+        "production_predictive_physics_ready": False,
         "total_correlation_energy_ev": total_ev,
         "num_solved_blocks": len(blocks),
         "ready": len(blockers) == 0,

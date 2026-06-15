@@ -279,7 +279,8 @@ block artifacts:
   `physical_readiness.json`.  This gives a single auditable manifest for the
   verified external ERI smoke path; it still requires an explicit AO mapping
   and does not make the second-order prototype a production correlated EWF
-  kernel.
+  kernel.  A production correlated solver override is available only when
+  explicitly requested; it is not the default path.
 - `cluster_two_electron_integrals.json` can be generated from an external
   AO-basis ERI tensor with the same orbital ordering as the SIESTA-returned
   matrices.  It writes per-block `cluster_two_electron_integrals_block_XXXX.npz`
@@ -388,6 +389,10 @@ PySCF molecule built from the FDF coordinates.  The auto path writes
 `pyscf_ao_mapping.json` and `pyscf_external_eri_workflow.json`.  If PySCF AO
 labels do not match the SIESTA `ORB_INDX` records, the workflow records a
 blocker instead of guessing a mapping.
+Set `EWF_PRODUCTION_CORRELATED_SOLVER=mp2` or `ccsd` only when you explicitly
+want the PySCF production solver to replace the second-order external-ERI
+correction in `effective_correlated_results.json`.  The default is `off`, which
+preserves the second-order manifest semantics.
 
 `SiestaEwfResult` is the first EWF-facing contract.  It keeps the local SIESTA
 matrix file paths and scalar status, but only assigns ownership to core atoms:
