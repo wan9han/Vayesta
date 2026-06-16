@@ -53,27 +53,88 @@ def hydrogens_bonded_to(mol: Molecule, carbon_idx: int, ch_max: float = CH_MAX) 
     return out
 
 
-def _sides_of_cut(mol: Molecule, cut: Tuple[int, int]) -> Tuple[List[int], List[int]]:
-    """Split carbons into two sides by removing the cut edge from the C–C graph."""
+def _carbon_graph(mol: Molecule, removed_edges):
+    """Adjacency among carbons with ``removed_edges`` (a set of frozensets) deleted."""
     adj = {c: set() for c in carbon_indices(mol)}
     for i, j in bonded_carbons(mol):
-        if {i, j} == set(cut):
-            continue  # remove the cut edge
+        if frozenset((i, j)) in removed_edges:
+            continue
         adj[i].add(j)
         adj[j].add(i)
+    return adj
 
-    def bfs(start) -> List[int]:
-        seen = {start}
+
+def _segments(mol: Molecule, cuts) -> List[List[int]]:
+    """Connected carbon components after removing all cut edges (chain → segments)."""
+    removed = {frozenset(c) for c in cuts}
+    adj = _carbon_graph(mol, removed)
+    seen: set = set()
+    segs: List[List[int]] = []
+    for start in carbon_indices(mol):
+        if start in seen:
+            continue
+        comp: List[int] = []
         dq = deque([start])
+        seen.add(start)
         while dq:
             n = dq.popleft()
+            comp.append(n)
             for m in adj[n]:
                 if m not in seen:
                     seen.add(m)
                     dq.append(m)
-        return sorted(seen)
+        segs.append(sorted(comp))
+    return segs
 
-    return bfs(cut[0]), bfs(cut[1])
+
+def _cap_positions(mol: Molecule, cuts, ch_bond: float):
+    """Map each cut-endpoint carbon to its cap-H coordinate (pointing at the partner)."""
+    cap_pos = {}
+    for i, j in cuts:
+        pi, pj = mol.coords[i], mol.coords[j]
+        d = _dist(pi, pj)
+        if d == 0:
+            raise ValueError(f"cut carbons {(i, j)} coincide")
+        u = (pj - pi) / d
+        cap_pos[i] = pi + u * ch_bond
+        cap_pos[j] = pj - u * ch_bond
+    return cap_pos
+
+
+def build_mfcc(
+    mol: Molecule,
+    cuts,
+    ch_bond: float = CH_BOND,
+) -> Tuple[List[Molecule], List[Molecule]]:
+    """General MFCC build for one or more C–C cuts.
+
+    ``cuts`` is a list of ``(i, j)`` bonded-carbon pairs. The chain is split
+    into ``len(cuts)+1`` contiguous capped fragments, and one H₂ conjugate
+    cap is produced per cut. Each cap hydrogen occupies the same coordinate
+    in its fragment and in the conjugate cap, so the cap bookkeeping cancels.
+    """
+    cuts = [tuple(c) for c in cuts]
+    segs = _segments(mol, cuts)
+    cap_pos = _cap_positions(mol, cuts, ch_bond)
+
+    fragments: List[Molecule] = []
+    for seg in segs:
+        atoms = list(seg)
+        for c in seg:
+            atoms.extend(hydrogens_bonded_to(mol, c))
+        els = [mol.elements[a] for a in atoms]
+        coords = mol.coords[atoms].copy()
+        frag = Molecule(els, coords, label=f"frag_{seg[0]}")
+        for c in seg:  # append cap H for every cut endpoint in this segment
+            if c in cap_pos:
+                frag.append("H", cap_pos[c])
+        fragments.append(frag)
+
+    caps = [
+        Molecule(["H", "H"], np.vstack([cap_pos[i], cap_pos[j]]), label=f"cap_{i}_{j}")
+        for i, j in cuts
+    ]
+    return fragments, caps
 
 
 def build_mfcc_cut(
@@ -81,64 +142,39 @@ def build_mfcc_cut(
     cut: Tuple[int, int],
     ch_bond: float = CH_BOND,
 ) -> Tuple[List[Molecule], List[Molecule]]:
-    """Build capped fragments and conjugate cap(s) for a single C–C cut.
+    """Single-cut MFCC (convenience wrapper over :func:`build_mfcc`)."""
+    return build_mfcc(mol, [cut], ch_bond=ch_bond)
 
-    Parameters
-    ----------
-    mol:
-        The full molecule.
-    cut:
-        ``(i, j)`` mol-atom indices of the two bonded carbons to cut.
-    ch_bond:
-        C–H bond length (Å) used to place the cap hydrogen.
 
-    Returns
-    -------
-    (fragments, caps)
-        ``fragments`` has one capped :class:`Molecule` per side; ``caps`` has
-        one H₂ conjugate cap. Each cap hydrogen sits at the same position in
-        its fragment and in the conjugate cap, so the cap bookkeeping cancels.
-    """
-    i, j = cut
-    side_a, side_b = _sides_of_cut(mol, cut)
+def _chain_bonds(mol: Molecule):
+    """Bonds between adjacent carbons, keyed by lower carbon-list rank."""
+    cs = carbon_indices(mol)
+    rank = {c: k for k, c in enumerate(cs)}
+    chain = {}
+    for i, j in bonded_carbons(mol):
+        if abs(rank[i] - rank[j]) == 1:
+            k = min(rank[i], rank[j])
+            chain[k] = (i, j)
+    return chain
 
-    pi, pj = mol.coords[i], mol.coords[j]
-    dij = _dist(pi, pj)
-    if dij == 0:
-        raise ValueError(f"cut carbons {cut} coincide")
-    u_ij = (pj - pi) / dij  # unit vector from i to j
 
-    cap_h_a = pi + u_ij * ch_bond      # caps carbon i, pointing toward j
-    cap_h_b = pj - u_ij * ch_bond      # caps carbon j, pointing toward i
-
-    def build_side(side_carbons, cap_carbon, cap_h) -> Molecule:
-        atoms = list(side_carbons)
-        for c in side_carbons:
-            atoms.extend(hydrogens_bonded_to(mol, c))
-        els = [mol.elements[a] for a in atoms]
-        coords = mol.coords[atoms].copy()
-        frag = Molecule(els, coords, label=f"frag_{cap_carbon}")
-        frag.append("H", cap_h)
-        return frag
-
-    frag_a = build_side(side_a, i, cap_h_a)
-    frag_b = build_side(side_b, j, cap_h_b)
-    cap = Molecule(["H", "H"], np.vstack([cap_h_a, cap_h_b]), label="cap")
-
-    return [frag_a, frag_b], [cap]
+def pick_cuts(mol: Molecule, num_fragments: int) -> List[Tuple[int, int]]:
+    """Choose cuts that split the carbon chain into ``num_fragments`` near-equal segments."""
+    cs = carbon_indices(mol)
+    n = len(cs)
+    if num_fragments < 1 or num_fragments > n:
+        raise ValueError(f"num_fragments={num_fragments} out of range [1,{n}]")
+    if num_fragments == 1:
+        return []
+    chain = _chain_bonds(mol)
+    cuts = []
+    for f in range(1, num_fragments):
+        k = round(f * n / num_fragments)  # boundary rank; cut bond cs[k-1]--cs[k]
+        cuts.append(chain[k - 1])
+    return cuts
 
 
 def pick_middle_cut(mol: Molecule) -> Tuple[int, int]:
-    """Choose the central C–C bond of the carbon chain as the cut.
-
-    For ``n`` carbons this cuts between carbon-list indices ``n//2 - 1`` and
-    ``n//2``. For a single cut this is the natural symmetric choice.
-    """
-    cs = carbon_indices(mol)
-    if len(cs) < 2:
-        raise ValueError("need at least 2 carbons to cut")
-    bonds = bonded_carbons(mol)
-    # order bonds by their position along the chain (by carbon-list index sum)
-    rank = {c: k for k, c in enumerate(cs)}
-    bonds_sorted = sorted(bonds, key=lambda b: rank[b[0]] + rank[b[1]])
-    return bonds_sorted[len(bonds_sorted) // 2]
+    """Choose the central C–C bond as the single cut (symmetric choice)."""
+    cuts = pick_cuts(mol, 2)
+    return cuts[0]
