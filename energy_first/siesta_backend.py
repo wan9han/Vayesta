@@ -43,14 +43,16 @@ def run_siesta(
     timeout: float = 600.0,
     basis_size: str = "SZ",
     mesh_cutoff_ry: float = 100.0,
+    solution_method: str = "diagonali",
 ) -> Dict[str, object]:
     """Run SIESTA on ``mol``; return ``{energy_ev, converged, returncode, ...}``.
 
     ``workdir`` is created (or reused). Pseudopotentials are copied from
     ``pseudo_dir`` for every element present. The FDF is written with an
     explicit vacuum cell so the result is comparable across molecules.
-    ``basis_size`` / ``mesh_cutoff_ry`` select the numerical level (identical
-    for full + fragments + caps to keep MFCC comparisons bias-free).
+    ``basis_size`` / ``mesh_cutoff_ry`` / ``solution_method`` ("diagonali" or
+    "ntpoly") select the numerical level (identical for full + fragments +
+    caps to keep MFCC comparisons bias-free).
     """
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -61,6 +63,7 @@ def run_siesta(
     write_siesta_fdf(
         mol, fdf_path, cell_margin=cell_margin,
         basis_size=basis_size, mesh_cutoff_ry=mesh_cutoff_ry,
+        solution_method=solution_method,
     )
 
     # Copy pseudopotentials for the species we actually use.

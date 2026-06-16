@@ -101,13 +101,19 @@ def write_siesta_fdf(
     mesh_cutoff_ry: float = 100.0,
     basis_size: str = "SZ",
     max_scf: int = 100,
+    solution_method: str = "diagonali",
 ) -> None:
     """Write a SIESTA FDF for ``mol`` with an explicit vacuum cell.
 
     Settings mirror ``gen.py`` (SZ / LDA-PZ / MeshCutoff) but add an explicit
-    orthorhombic cell and use plain ``Diagonali`` (fine for the small
-    molecules of Stage 1). Identical settings for full + fragments + caps keep
-    the comparison bias-free.
+    orthorhombic cell. ``solution_method`` selects the density-matrix solver:
+
+      * ``diagonali`` — standard LAPACK diagonalization (fast for small mol.)
+      * ``ntpoly``    — ELSI/NTPoly TRS2 (method 2), the project's sparse
+        solver for large blocks; uses the stable SCF settings from the
+        existing project (MaxSCF 150, Pulay 6, mixing 0.05).
+
+    Identical settings for full + fragments + caps keep comparisons bias-free.
     """
     from pathlib import Path
 
@@ -140,7 +146,16 @@ def write_siesta_fdf(
     lines.append("")
     lines.append("PAO.BasisType    split")
     lines.append(f"PAO.BasisSize    {basis_size}")
-    lines.append("SolutionMethod   Diagonali")
+    if solution_method == "ntpoly":
+        lines.append("SolutionMethod     ELSI")
+        lines.append("ELSI.Solver        ntpoly")
+        lines.append("ELSI.NTPoly.Method 2")
+        lines.append("ELSI.NTPoly.Filter 1.0e-9")
+        lines.append("ELSI.NTPoly.Tolerance 1.0e-6")
+        eff_max_scf = max(max_scf, 150)
+    else:
+        lines.append("SolutionMethod   Diagonali")
+        eff_max_scf = max_scf
     lines.append("PAO.SplitNorm    0.150000")
     lines.append("PAO.EnergyShift  0.020000  Ry")
     lines.append("Harris_functional false")
@@ -150,7 +165,7 @@ def write_siesta_fdf(
     lines.append(f"MeshCutoff       {mesh_cutoff_ry:.6f} Ry")
     lines.append("kgrid_cutoff     0.0 Bohr")
     lines.append("ElectronicTemperature 300.0 K")
-    lines.append(f"MaxSCFIterations {max_scf}")
+    lines.append(f"MaxSCFIterations {eff_max_scf}")
     lines.append("DM.NumberPulay   6")
     lines.append("DM.MixingWeight  0.050000")
     lines.append("UseSaveData      false")
