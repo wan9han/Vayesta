@@ -44,6 +44,8 @@ def main(argv=None):
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--work-root", default="/tmp/stage1d-runs")
     ap.add_argument("--basis", default="SZ")
+    ap.add_argument("--solution-method", default="diagonali",
+                    choices=["diagonali", "ntpoly"])
     ap.add_argument("--cases", type=str, default="2:2,4:2,8:2,8:3,8:4",
                     help="comma list of n_carbons:num_fragments")
     args = ap.parse_args(argv)
@@ -54,12 +56,12 @@ def main(argv=None):
 
     def run(mol, label):
         mol = mol.__class__(list(mol.elements), mol.coords.copy(), label)
-        key = (args.basis, _fp(mol))
+        key = (args.basis, args.solution_method, _fp(mol))
         if key in cache:
             return cache[key]
-        d = root / f"{args.basis}_run_{len(cache):04d}_{label}"
+        d = root / f"{args.solution_method}_{len(cache):04d}_{label}"
         r = run_siesta(mol, d, siesta_bin=args.siesta_bin, pseudo_dir=args.pseudo_dir,
-                       label=label, basis_size=args.basis)
+                       label=label, basis_size=args.basis, solution_method=args.solution_method)
         cache[key] = r["energy_ev"]
         return r["energy_ev"]
 
