@@ -63,7 +63,22 @@ def main():
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--basis", default="SZ")
     ap.add_argument("--mesh-cutoff-ry", type=float, default=100.0)
+    # ---- HONPAS binding (no SLURM; mpirun from first host) ----
+    ap.add_argument("--hosts", nargs="+",
+                    default=["71.20.27.21", "71.20.27.22", "71.20.27.23", "71.20.27.24",
+                             "71.20.27.33", "71.20.27.34", "71.20.27.35", "71.20.27.36"],
+                    help="available machines; first num-nodes are used")
+    ap.add_argument("--num-numa", type=int, default=16, help="NUMAs per node")
+    ap.add_argument("--cores-per-numa", type=int, default=38, help="cores per NUMA")
+    ap.add_argument("--skip-cores", type=int, default=2,
+                    help="skip this many first cores of EACH NUMA (use the rest for 1 MPI proc)")
+    ap.add_argument("--omp-threads", type=int, default=None,
+                    help="OMP/MKL/OPENBLAS threads per MPI proc (default = cores_per_numa - skip_cores)")
     args = ap.parse_args()
+    if args.num_nodes > len(args.hosts):
+        raise SystemExit(f"num-nodes={args.num_nodes} > available hosts {len(args.hosts)}")
+    if args.omp_threads is None:
+        args.omp_threads = args.cores_per_numa - args.skip_cores
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -173,24 +188,53 @@ def main():
         for el in set(m.elements):
             shutil.copy2(Path(args.pseudo_dir) / f"{el}.psf", cd / f"{el}.psf")
 
-    # ---- 7. schedule + launch.sh
+    # ---- 7. schedule + rankfile + bound launch.sh (HONPAS, no SLURM)
     (out / "schedule.json").write_text(json.dumps(schedule, indent=2))
+
+    # Per-NUMA core ranges: NUMA k -> global cores [k*cpn+skip .. k*cpn+cpn-1].
+    # ASSUMES contiguous NUMA layout (NUMA k occupies cores k*cpn .. k*cpn+cpn-1).
+    slots = []
+    for k in range(args.num_numa):
+        lo = k * args.cores_per_numa + args.skip_cores
+        hi = k * args.cores_per_numa + args.cores_per_numa - 1
+        slots.append(f"{lo}-{hi}")
+    rf = ["# OpenMPI rankfile: rank r -> NUMA r -> that NUMA's cores (skip first skip_cores).",
+          "# __HOST__ is substituted per target node by launch.sh.",
+          "# VERIFY the NUMA->CPU map with `numactl -H` / `lscpu -e`; edit if topology differs."]
+    for k, s in enumerate(slots):
+        rf.append(f"rank {k}=__HOST__ slot={s}")
+    (out / "rankfile_template.txt").write_text("\n".join(rf) + "\n")
+
+    hosts = args.hosts[:nn]
+    omp = args.omp_threads
     launch = []
     launch.append("#!/bin/bash")
-    launch.append(f"# Weak-scaling launch: {nn} blocks x {ppn} MPI ranks/block (HONPAS).")
-    launch.append(f"# block b -> ranks [{ppn}*b .. {ppn}*(b+1)-1] on node b.")
-    launch.append("# On SLURM/HONPAS: allocate nn nodes x ppn ranks, then run each block")
-    launch.append("# as a separate mpirun -np ppn bound to its node (concurrent).")
+    launch.append("# HONPAS weak-scaling launch (no SLURM). Run from the first host via mpirun --host.")
+    launch.append(f"# {nn} blocks x {args.num_numa} MPI ranks/block; 1 rank/NUMA, {omp} OMP threads/rank.")
+    launch.append("# block b -> node hosts[b]; ranks bound by rankfile (1 per NUMA, cores skip first 2).")
+    launch.append("# !!! ASSUMES NUMA k = cores [k*38 .. k*38+37]. VERIFY with `numactl -H`; fix rankfile_*.txt if not.")
+    launch.append("# !!! Requires passwordless ssh from this host to every host in HOSTS.")
+    launch.append(f'HOSTS=({" ".join(hosts)})')
+    launch.append('N="${1:-' + str(nn) + '}"  # override node count: ./launch.sh [N] (regenerate if N>nn)')
     launch.append('SIESTA="${SIESTA:-siesta}"')
+    launch.append(f'export OMP_NUM_THREADS={omp} MKL_NUM_THREADS={omp} OPENBLAS_NUM_THREADS={omp}')
+    launch.append('export OMP_PROC_BIND=close OMP_PLACES=cores')
     launch.append(f'cd "{out}"')
-    launch.append("set -e")
-    for b in range(nn):
-        launch.append(f"( cd block_{b:04d} && mpirun -np {ppn} $SIESTA < input.fdf > siesta.out 2>&1 ) &")
+    launch.append("for ((i=0;i<N;i++)); do")
+    launch.append('  h=${HOSTS[$i]}')
+    launch.append('  blk=$(printf "block_%04d" $i)')
+    launch.append('  sed "s/__HOST__/$h/" rankfile_template.txt > "$blk/rankfile.txt"')
+    launch.append(f'  ( cd "$blk" && mpirun -np {args.num_numa} --host "$h" \\')
+    launch.append('      --rankfile rankfile.txt --bind-to core --report-bindings \\')
+    launch.append('      -x OMP_NUM_THREADS -x MKL_NUM_THREADS -x OPENBLAS_NUM_THREADS \\')
+    launch.append('      -x OMP_PROC_BIND -x OMP_PLACES \\')
+    launch.append('      "$SIESTA" < input.fdf > siesta.out 2>&1 ) &')
+    launch.append("done")
     launch.append("wait")
     launch.append('echo "all blocks done; combining MFCC E^(1) = sum(blocks) - sum(caps)"')
     combine = (
         f'{args.python} -c "'
-        f"import re,glob,json;"
+        f"import re;"
         f"def E(p):"
         f"  t=open(p+'/siesta.out').read();"
         f"  m=re.findall(r'Total\\\\s*=\\\\s*(-?\\d+\\.\\d+)',t);"
