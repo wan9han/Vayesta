@@ -342,6 +342,11 @@ RANKFILE="$PWD/rankfile.local"
 {rank_lines}
 }} > "$RANKFILE"
 
+rmmod -f sdma-dae
+insmod /usr/lib/modules/5.10.0/kernel/drivers/misc/sdma-dae/sdma_dae.ko share_chns=160 safe_mode=0
+sync
+echo 3 > /proc/sys/vm/drop_caches
+
   "${{MPIRUN}}" --allow-run-as-root \
   --prefix "${{MPI_PREFIX}}" \
   -host "${{HOSTNAME_FQDN}}:{args.procs_per_node}" \
@@ -360,6 +365,7 @@ RANKFILE="$PWD/rankfile.local"
   -x UCX_UD_VERBS_ALLOC=thp,md,mmap,heap \
   -x UCX_RC_VERBS_ALLOC=thp,md,mmap,heap \
   -x UCX_RC_VERBS_TX_MIN_SGE=2 \
+  -x UCX_UD_VERBS_TX_MIN_SGE=1 \
   "${{APP}}" input.fdf |& tee siesta.out
 """
 
@@ -370,6 +376,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 source ../honpas_env.sh
+
+rmmod -f sdma-dae
+insmod /usr/lib/modules/5.10.0/kernel/drivers/misc/sdma-dae/sdma_dae.ko share_chns=160 safe_mode=0
+sync
+echo 3 > /proc/sys/vm/drop_caches
 
 "${APP}" input.fdf |& tee siesta.out
 """
