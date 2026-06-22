@@ -438,7 +438,7 @@ for ((i=0;i<{args.num_nodes};i++)); do
 done
 wait
 
-ssh "{ssh_user}${{CAP_HOST}}" "cd '$REMOTE_OUT_DIR' && for d in cap_*; do (cd \\\"$d\\\" && bash ./run_local.sh); done" \
+ssh "{ssh_user}${{CAP_HOST}}" "cd '$REMOTE_OUT_DIR' && for d in cap_*; do (cd \\\"\$d\\\" && bash ./run_local.sh); done" \
   > "$LOG_DIR/caps.$CAP_HOST.log" 2>&1
 
 python3 combine_results.py
