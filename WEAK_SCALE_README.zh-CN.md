@@ -15,7 +15,7 @@
 - 每个节点只跑自己的 `block_xxxx/run_local.sh`
 - 顶层用 `submit_per_node_local.sh` 通过 `ssh` 并发触发
 - 所有 block 结束后，再单独计算 `cap_*`
-- 最后用 `combine_results.py` 汇总能量和 wall time
+- 最后用 `combine_results.py` 汇总能量
 
 这比“首节点一个总 `mpirun` 扇出到所有节点”的方式更接近真实弱扩展结构。
 
@@ -197,16 +197,9 @@ REMOTE_OUT_DIR=/share/honpas/xzz/ws/ws4 bash ./submit_per_node_local.sh
 主要字段含义：
 
 - `E_mfcc_ev`：MFCC 组合后的总能量
-- `max_block_wall_s`：所有 block 中最慢那个节点的 wall time
-- `sum_block_wall_s`：所有 block 的 wall time 总和
-- `sum_cap_wall_s`：所有 cap 的 wall time 总和
 - `missing_outputs`：没成功提取能量的输出文件
 
-做弱扩展时，最应该关注的是：
-
-- `max_block_wall_s`
-
-因为在“一节点一个 block”的结构下，整体并行 wall time 主要由最慢的那个 block 决定。
+时间信息请直接看各目录里的 `siesta.out`。当前脚本不再额外包一层 `time`，避免不同节点 shell 实现不一致。
 
 ## 8. 建议的测试方式
 
@@ -228,7 +221,6 @@ python3 weak_scale_pe.py ... --atoms-per-node 5000 --num-nodes 8 --out-dir /shar
 
 然后分别运行各自目录下的 `submit_per_node_local.sh`，比较每组的：
 
-- `max_block_wall_s`
 - `E_mfcc_ev`
 - `missing_outputs`
 
@@ -251,6 +243,7 @@ python3 weak_scale_pe.py ... --atoms-per-node 5000 --num-nodes 8 --out-dir /shar
 - `--remote-out-dir` 最好显式指定成所有节点都能看到的共享路径。
 - 运行前先确认 `honpas_env.sh` 里写入的路径和你们内网实际环境一致。
 - 当前脚本默认 block 用 `ntpoly`，cap 用 `diagonali`。
+- 当前汇总脚本只提取能量；运行时间请从各自的 `siesta.out` 中读取。
 - `submit_per_node_local.sh` 依赖免密 `ssh`。
 - 如果某个节点输出里没有 `siesta: ... Total = ...`，`combine_results.py` 会把它列到 `missing_outputs`。
 

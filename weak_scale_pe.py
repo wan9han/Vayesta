@@ -342,7 +342,6 @@ RANKFILE="$PWD/rankfile.local"
 {rank_lines}
 }} > "$RANKFILE"
 
-time -p -o walltime.txt \
   "${{MPIRUN}}" --allow-run-as-root \
   --prefix "${{MPI_PREFIX}}" \
   -host "${{HOSTNAME_FQDN}}:{args.procs_per_node}" \
@@ -372,7 +371,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 source ../honpas_env.sh
 
-time -p -o walltime.txt "${APP}" input.fdf |& tee siesta.out
+"${APP}" input.fdf |& tee siesta.out
 """
 
 
@@ -454,7 +453,6 @@ import re
 from pathlib import Path
 
 TOTAL_RE = re.compile(r"^\\s*siesta:.*Total\\s*=\\s*(-?\\d+\\.\\d+)", re.MULTILINE)
-REAL_RE = re.compile(r"^real\\s+(\\d+(?:\\.\\d+)?)$", re.MULTILINE)
 
 
 def parse_energy(path: Path):
@@ -463,14 +461,6 @@ def parse_energy(path: Path):
     text = path.read_text()
     matches = TOTAL_RE.findall(text)
     return float(matches[-1]) if matches else None
-
-
-def parse_wall(path: Path):
-    if not path.exists():
-        return None
-    text = path.read_text()
-    match = REAL_RE.search(text)
-    return float(match.group(1)) if match else None
 
 
 def main():
@@ -486,8 +476,7 @@ def main():
     for i in range(num_nodes):
         block_dir = root / f"block_{i:04d}"
         energy = parse_energy(block_dir / "siesta.out")
-        wall = parse_wall(block_dir / "walltime.txt")
-        row = {{"block_id": i, "energy_ev": energy, "wall_s": wall}}
+        row = {{"block_id": i, "energy_ev": energy}}
         block_rows.append(row)
         if energy is None:
             missing.append(str(block_dir / "siesta.out"))
@@ -495,8 +484,7 @@ def main():
     for i in range(num_caps):
         cap_dir = root / f"cap_{i:04d}"
         energy = parse_energy(cap_dir / "siesta.out")
-        wall = parse_wall(cap_dir / "walltime.txt")
-        row = {{"cap_id": i, "energy_ev": energy, "wall_s": wall}}
+        row = {{"cap_id": i, "energy_ev": energy}}
         cap_rows.append(row)
         if energy is None:
             missing.append(str(cap_dir / "siesta.out"))
@@ -507,15 +495,10 @@ def main():
     if len(block_energies) == num_nodes and len(cap_energies) == num_caps:
         e_mfcc = sum(block_energies) - sum(cap_energies)
 
-    walls = [r["wall_s"] for r in block_rows if r["wall_s"] is not None]
-    cap_walls = [r["wall_s"] for r in cap_rows if r["wall_s"] is not None]
     summary = {{
         "num_nodes": num_nodes,
         "num_caps": num_caps,
         "E_mfcc_ev": e_mfcc,
-        "max_block_wall_s": max(walls) if walls else None,
-        "sum_block_wall_s": sum(walls) if walls else None,
-        "sum_cap_wall_s": sum(cap_walls) if cap_walls else None,
         "missing_outputs": missing,
         "blocks": block_rows,
         "caps": cap_rows,
@@ -525,7 +508,6 @@ def main():
     print("blocks =", block_rows)
     print("caps   =", cap_rows)
     print("E_MFCC =", e_mfcc)
-    print("max_block_wall_s =", summary["max_block_wall_s"])
     print("results ->", root / "weak_scaling_results.json")
 
 
