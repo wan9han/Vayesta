@@ -342,7 +342,7 @@ RANKFILE="$PWD/rankfile.local"
 {rank_lines}
 }} > "$RANKFILE"
 
-/usr/bin/time -p -o walltime.txt \
+time -p -o walltime.txt \
   "${{MPIRUN}}" --allow-run-as-root \
   --prefix "${{MPI_PREFIX}}" \
   -host "${{HOSTNAME_FQDN}}:{args.procs_per_node}" \
@@ -372,7 +372,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 source ../honpas_env.sh
 
-/usr/bin/time -p -o walltime.txt "${APP}" input.fdf |& tee siesta.out
+time -p -o walltime.txt "${APP}" input.fdf |& tee siesta.out
 """
 
 
