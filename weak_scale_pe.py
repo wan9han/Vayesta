@@ -41,6 +41,7 @@ DEFAULT_HOSTS = [
     "71.20.27.35",
     "71.20.27.36",
 ]
+DEFAULT_GEN_SCRIPT = Path(__file__).resolve().parent / "gen.py"
 
 
 def _cap_pos(c_coord, neighbor_coord, ch=CH_BOND):
@@ -78,7 +79,11 @@ def _parse_args():
         default=16,
         help="MPI ranks per node / per block (1 rank per NUMA by default)",
     )
-    ap.add_argument("--gen-script", required=True, help="path to testcases/gen.py")
+    ap.add_argument(
+        "--gen-script",
+        default=str(DEFAULT_GEN_SCRIPT),
+        help="path to PE generator script (default: repo-local gen.py)",
+    )
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--pseudo-dir", required=True)
     ap.add_argument("--out-dir", required=True)
@@ -557,6 +562,10 @@ def main():
     if args.num_nodes > len(args.hosts):
         raise SystemExit(
             f"num-nodes={args.num_nodes} > available hosts {len(args.hosts)}"
+        )
+    if not Path(args.gen_script).exists():
+        raise SystemExit(
+            f"gen script not found: {args.gen_script}"
         )
     if args.omp_threads is None:
         args.omp_threads = args.cores_per_numa - args.skip_cores

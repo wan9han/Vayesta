@@ -24,13 +24,15 @@
 需要准备以下内容：
 
 - Python 环境，且安装了 `numpy`
-- `gen.py`，用于生成聚乙烯链
+- 仓库根目录下的 `gen.py`，用于生成聚乙烯链
 - `pseudo-dir`，目录里至少有 `C.psf` 和 `H.psf`
 - 计算节点可访问的共享目录
 - 节点之间已配置免密 `ssh`
 - 节点上可用的 SIESTA、MPI、UCX、XPMEM 环境
 
 脚本会自动生成一个 `honpas_env.sh`，把当前约定的 HONPAS 环境变量写进去。如果你们内网真实路径不同，可以通过命令行参数覆盖。
+
+`weak_scale_pe.py` 现在默认使用仓库根目录下的 [gen.py](/home/xzz2/huawei-siesta-energy-first/Vayesta/gen.py)。只有当你想改用别的 PE 生成脚本时，才需要显式传 `--gen-script`。
 
 ## 3. 如何指定每个节点算多少原子
 
@@ -42,7 +44,6 @@
 python3 weak_scale_pe.py \
   --atoms-per-node 5000 \
   --num-nodes 4 \
-  --gen-script /path/to/gen.py \
   --pseudo-dir /path/to/pseudos \
   --out-dir /share/weak_scale/ws4
 ```
@@ -78,7 +79,6 @@ python3 weak_scale_pe.py \
   --atoms-per-node 5000 \
   --num-nodes 4 \
   --procs-per-node 16 \
-  --gen-script /share/honpas/xzz/siesta-20260520/testcase/gen.py \
   --pseudo-dir /share/honpas/xzz/siesta-20260520/testcase \
   --out-dir /share/honpas/xzz/ws/ws4 \
   --remote-out-dir /share/honpas/xzz/ws/ws4 \
@@ -90,13 +90,21 @@ python3 weak_scale_pe.py \
 - `--atoms-per-node`：每节点目标原子数
 - `--num-nodes`：节点数，也等于 block 数
 - `--procs-per-node`：每个节点的 MPI rank 数
-- `--gen-script`：PE 生成脚本
+- `--gen-script`：可选，覆盖默认的仓库内 `gen.py`
 - `--pseudo-dir`：赝势目录
 - `--out-dir`：当前机器写出的目录
 - `--remote-out-dir`：远端节点实际看到的共享目录路径
 - `--ssh-user`：可选，指定 `ssh` 登录用户名
 
-### 4.2 如果 HONPAS 路径不是默认值
+### 4.2 如果要改用别的 PE 生成脚本
+
+例如切回内网原始 `gen.py`：
+
+```bash
+  --gen-script /share/honpas/xzz/siesta-20260520/testcase/gen.py
+```
+
+### 4.3 如果 HONPAS 路径不是默认值
 
 可以补这些参数：
 
@@ -107,7 +115,7 @@ python3 weak_scale_pe.py \
   --env-sh /share/honpas/xxx/siesta-20260520/env.sh
 ```
 
-### 4.3 如果节点列表不是默认 8 台
+### 4.4 如果节点列表不是默认 8 台
 
 ```bash
   --hosts 71.20.27.21 71.20.27.22 71.20.27.23 71.20.27.24
@@ -253,7 +261,6 @@ python3 weak_scale_pe.py \
   --atoms-per-node 5000 \
   --num-nodes 4 \
   --hosts 71.20.27.21 71.20.27.22 71.20.27.23 71.20.27.24 \
-  --gen-script /share/honpas/xzz/siesta-20260520/testcase/gen.py \
   --pseudo-dir /share/honpas/xzz/siesta-20260520/testcase \
   --out-dir /share/honpas/xzz/ws/ws4 \
   --remote-out-dir /share/honpas/xzz/ws/ws4 \
