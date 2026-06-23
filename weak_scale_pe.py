@@ -370,20 +370,11 @@ echo 3 > /proc/sys/vm/drop_caches
 """
 
 
-def _render_cap_runner():
-    return """#!/bin/bash
-set -euo pipefail
-
-cd "$(dirname "$0")"
-source ../honpas_env.sh
-
-rmmod -f sdma-dae
-insmod /usr/lib/modules/5.10.0/kernel/drivers/misc/sdma-dae/sdma_dae.ko share_chns=160 safe_mode=0
-sync
-echo 3 > /proc/sys/vm/drop_caches
-
-"${APP}" input.fdf |& tee siesta.out
-"""
+def _render_cap_runner(slots, args):
+    # Caps must launch siesta through the same node-local mpirun invocation as
+    # blocks (rankfile, -host, -np, all -x/--mca flags). Running "${APP}"
+    # directly fails every cap with no final "Total =" line.
+    return _render_block_runner(slots, args)
 
 
 def _render_legacy_head_launch(out: Path, args):
@@ -547,7 +538,7 @@ def _write_launch_artifacts(out: Path, schedule, args):
     for b in range(schedule["num_nodes"]):
         _write(out / f"block_{b:04d}" / "run_local.sh", _render_block_runner(slots, args), 0o755)
     for c in range(len(schedule["caps"])):
-        _write(out / f"cap_{c:04d}" / "run_local.sh", _render_cap_runner(), 0o755)
+        _write(out / f"cap_{c:04d}" / "run_local.sh", _render_cap_runner(slots, args), 0o755)
 
 
 def main():
