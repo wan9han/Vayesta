@@ -487,7 +487,7 @@ def main():
     for i in range(num_nodes):
         block_dir = root / f"block_{i:04d}"
         energy = parse_energy(block_dir / "siesta.out")
-        row = {{"block_id": i, "energy_ev": energy}}
+        row = {"block_id": i, "energy_ev": energy}
         block_rows.append(row)
         if energy is None:
             missing.append(str(block_dir / "siesta.out"))
@@ -495,7 +495,7 @@ def main():
     for i in range(num_caps):
         cap_dir = root / f"cap_{i:04d}"
         energy = parse_energy(cap_dir / "siesta.out")
-        row = {{"cap_id": i, "energy_ev": energy}}
+        row = {"cap_id": i, "energy_ev": energy}
         cap_rows.append(row)
         if energy is None:
             missing.append(str(cap_dir / "siesta.out"))
@@ -506,14 +506,14 @@ def main():
     if len(block_energies) == num_nodes and len(cap_energies) == num_caps:
         e_mfcc = sum(block_energies) - sum(cap_energies)
 
-    summary = {{
+    summary = {
         "num_nodes": num_nodes,
         "num_caps": num_caps,
         "E_mfcc_ev": e_mfcc,
         "missing_outputs": missing,
         "blocks": block_rows,
         "caps": cap_rows,
-    }}
+    }
     (root / "weak_scaling_results.json").write_text(json.dumps(summary, indent=2) + "\\n")
 
     print("blocks =", block_rows)
