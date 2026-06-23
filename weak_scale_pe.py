@@ -244,7 +244,7 @@ def _slot_ranges(args):
     return slots
 
 
-def _write_inputs(out: Path, block_mols, cap_mols, args):
+def _write_inputs(out: Path, full_mol, block_mols, cap_mols, args):
     pseudo_dir = Path(args.pseudo_dir)
     for b, mol in enumerate(block_mols):
         block_dir = out / f"block_{b:04d}"
@@ -271,6 +271,20 @@ def _write_inputs(out: Path, block_mols, cap_mols, args):
         )
         for el in set(mol.elements):
             shutil.copy2(pseudo_dir / f"{el}.psf", cap_dir / f"{el}.psf")
+
+    # Unfragmented full-chain baseline (MFCC reference energy). Same numerical
+    # settings as the blocks (ntpoly) so E_full is directly comparable to E_mfcc.
+    full_dir = out / "full"
+    full_dir.mkdir(parents=True, exist_ok=True)
+    write_siesta_fdf(
+        full_mol,
+        full_dir / "input.fdf",
+        basis_size=args.basis,
+        mesh_cutoff_ry=args.mesh_cutoff_ry,
+        solution_method="ntpoly",
+    )
+    for el in set(full_mol.elements):
+        shutil.copy2(pseudo_dir / f"{el}.psf", full_dir / f"{el}.psf")
 
 
 def _render_env_script(args):
@@ -539,6 +553,8 @@ def _write_launch_artifacts(out: Path, schedule, args):
         _write(out / f"block_{b:04d}" / "run_local.sh", _render_block_runner(slots, args), 0o755)
     for c in range(len(schedule["caps"])):
         _write(out / f"cap_{c:04d}" / "run_local.sh", _render_cap_runner(slots, args), 0o755)
+    # Unfragmented baseline: launch on one node like a block (ntpoly).
+    _write(out / "full" / "run_local.sh", _render_block_runner(slots, args), 0o755)
 
 
 def main():
@@ -567,7 +583,7 @@ def main():
     print(f"generated {mol.natoms} atoms", flush=True)
 
     schedule, block_mols, cap_mols = _build_fragments(mol, n_c, args)
-    _write_inputs(out, block_mols, cap_mols, args)
+    _write_inputs(out, mol, block_mols, cap_mols, args)
     _write_launch_artifacts(out, schedule, args)
 
     print(f"\n{args.num_nodes} blocks (capped, MFCC-style):", flush=True)
@@ -579,6 +595,7 @@ def main():
             flush=True,
         )
     print(f"{len(cap_mols)} conjugate caps (H2, serial reference jobs)", flush=True)
+    print(f"full-chain baseline (unfragmented, ntpoly) -> {out / 'full'}", flush=True)
     print(f"\nschedule                -> {out / 'schedule.json'}")
     print(f"recommended launcher    -> {out / 'submit_per_node_local.sh'}")
     print(f"legacy launcher         -> {out / 'launch_head_mpirun.sh'}")
