@@ -339,7 +339,9 @@ ulimit -s unlimited
 """
 
 
-def _render_block_runner(slots, args):
+def _render_block_runner(slots, args, procs=None):
+    if procs is None:
+        procs = args.procs_per_node
     rank_lines = "\n".join(
         f'  echo "rank {i}=$HOSTNAME_FQDN slots={lo}-{hi}"'
         for i, (lo, hi) in enumerate(slots)
@@ -363,9 +365,9 @@ echo 3 > /proc/sys/vm/drop_caches
 
   "${{MPIRUN}}" --allow-run-as-root \
   --prefix "${{MPI_PREFIX}}" \
-  -host "${{HOSTNAME_FQDN}}:{args.procs_per_node}" \
+  -host "${{HOSTNAME_FQDN}}:{procs}" \
   -wdir "$PWD" \
-  -np {args.procs_per_node} \
+  -np {procs} \
   -x PATH -x LD_LIBRARY_PATH -x OPAL_PREFIX \
   -x OMP_NUM_THREADS -x OMP_PROC_BIND -x OMP_PLACES \
   -x OPENBLAS_NUM_THREADS -x MKL_NUM_THREADS \
@@ -385,10 +387,10 @@ echo 3 > /proc/sys/vm/drop_caches
 
 
 def _render_cap_runner(slots, args):
-    # Caps must launch siesta through the same node-local mpirun invocation as
-    # blocks (rankfile, -host, -np, all -x/--mca flags). Running "${APP}"
+    # Caps are tiny H2 jobs, so run a single-core mpirun (procs=1) instead of
+    # the full node. Same node-local flags/env as blocks; running "${APP}"
     # directly fails every cap with no final "Total =" line.
-    return _render_block_runner(slots, args)
+    return _render_block_runner(slots, args, procs=1)
 
 
 def _render_legacy_head_launch(out: Path, args):
