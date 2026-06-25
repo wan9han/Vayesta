@@ -434,7 +434,21 @@ ulimit -s unlimited
 """
 
 
-def _render_block_runner(slots, args, procs=None):
+# NTPOLY_SLICE_NUM bumps from 1 -> 2 once a task's density-matrix purification
+# gets large enough to benefit from an extra slice (keeps each slice's working
+# set in HBM). Dimers are ~2x a block, so they cross the threshold at a smaller
+# per-node atom count than blocks do.
+_DIMER_SLICE_ATOMS = 2000
+_BLOCK_SLICE_ATOMS = 8000
+
+
+def _ntpoly_slice_num(kind, atoms_per_node):
+    """NTPOLY_SLICE_NUM (1 or 2) for a ``kind`` task ('block' or 'dimer')."""
+    threshold = _DIMER_SLICE_ATOMS if kind == "dimer" else _BLOCK_SLICE_ATOMS
+    return 2 if atoms_per_node >= threshold else 1
+
+
+def _render_block_runner(slots, args, procs=None, ntpoly_slice_num=1):
     if procs is None:
         procs = args.procs_per_node
     rank_lines = "\n".join(
@@ -446,6 +460,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 source ../honpas_env.sh
+
+# Per-task NTPOLY_SLICE_NUM override (honpas_env.sh defaults it to 1). Larger
+# blocks/dimers split the density-matrix purification into more slices to keep
+# each slice's working set in HBM. The mpirun -x NTPOLY_SLICE_NUM below forwards
+# this overridden value to every rank.
+export NTPOLY_SLICE_NUM={ntpoly_slice_num}
 
 HOSTNAME_FQDN="$(hostname -f 2>/dev/null || hostname)"
 RANKFILE="$PWD/rankfile.local"
@@ -703,13 +723,26 @@ def _write_launch_artifacts(out: Path, schedule, args):
         rf.append(f"rank {i}=__HOST__ slots={lo}-{hi}")
     _write(out / "rankfile_template.txt", "\n".join(rf) + "\n")
 
+    # NTPOLY_SLICE_NUM is bumped to 2 once a task's matrix gets large: dimers are
+    # ~2x a block so they cross the threshold at a smaller per-node atom count.
+    apn = getattr(args, "atoms_per_node", 0)
+    block_slice = _ntpoly_slice_num("block", apn)
+    dimer_slice = _ntpoly_slice_num("dimer", apn)
     for b in range(schedule["num_nodes"]):
-        _write(out / f"block_{b:04d}" / "run_local.sh", _render_block_runner(slots, args), 0o755)
+        _write(
+            out / f"block_{b:04d}" / "run_local.sh",
+            _render_block_runner(slots, args, ntpoly_slice_num=block_slice),
+            0o755,
+        )
     for c in range(len(schedule["caps"])):
         _write(out / f"cap_{c:04d}" / "run_local.sh", _render_cap_runner(slots, args), 0o755)
     # Joined dimers run like blocks (full-node ntpoly job).
     for k in range(len(schedule.get("dimers", []))):
-        _write(out / f"dimer_{k:04d}" / "run_local.sh", _render_block_runner(slots, args), 0o755)
+        _write(
+            out / f"dimer_{k:04d}" / "run_local.sh",
+            _render_block_runner(slots, args, ntpoly_slice_num=dimer_slice),
+            0o755,
+        )
     # Unfragmented baseline: launch on one node like a block (ntpoly).
     _write(out / "full" / "run_local.sh", _render_block_runner(slots, args), 0o755)
 
