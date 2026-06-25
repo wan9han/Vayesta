@@ -172,4 +172,13 @@ def write_siesta_fdf(
     lines.append("WriteDM          false")
     lines.append("SaveHS           false")
     lines.append("WriteCoorXmol    true")
+    # SIESTA built-in timer. UseTreeTimer prints a hierarchical wall-time report
+    # to stdout and writes time.json; TimingSplitScfSteps records each SCF step
+    # separately; TimerReportThreshold 0.0 prints every timed section. Parallel
+    # timer off (master wall time only, no per-rank overhead). The classic CPU
+    # report is also written to <SystemLabel>.times.
+    lines.append("UseTreeTimer           true")
+    lines.append("TimerReportThreshold   0.0")
+    lines.append("TimingSplitScfSteps    true")
+    lines.append("UseParallelTimer       false")
     path.write_text("\n".join(lines) + "\n")
