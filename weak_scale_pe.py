@@ -8,8 +8,21 @@ artifact, but also generates the more realistic HONPAS flow:
 * one capped PE block per target node;
 * each node runs its own local ``mpirun`` for that block only;
 * a coordinator script ``ssh``'s into each host and triggers the local job;
-* MFCC conjugate caps are run separately (small serial jobs) and then
-  combined with the block energies.
+* MFCC conjugate caps are run separately (small serial jobs);
+* **MBE(2) joined dimers** (one per cut, ~2x a block) restore the per-cut
+  interaction that plain MFCC misses (~1.24 eV/cut H-cap error). Without them
+  the combiner falls back to MFCC(1) and the total is off by ~1.24 eV/cut.
+
+Energy combination (``combine_results.py``):
+
+    E^(1) = Σ E(block) − Σ E(cap)                         # MFCC(1), ~1.24 eV/cut
+    E^(2) = E^(1) + Σ_c [E(dimer_c) − E(block) − E(cap)]  # MBE(2), ≈ E_full
+
+The cap terms cancel over all cuts, so E^(2) is inclusion–exclusion over the
+overlapping joined pieces. E^(2) reproduces E_full exactly for 2 fragments and
+to the small 3-body residual (~1e-3 eV/cut) for a long chain. Cost: N−1 extra
+dimer jobs at ~2x the block size; each is still a single bounded node-local
+solve, so the weak-scaling structure is preserved.
 
 That structure matches the weak-scaling claim more honestly: the main timing
 signal is the per-node block solve, not a single distributed launcher.
@@ -89,6 +102,29 @@ def _parse_args():
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--basis", default="SZ")
     ap.add_argument("--mesh-cutoff-ry", type=float, default=100.0)
+    ap.add_argument(
+        "--mbe-order",
+        type=int,
+        default=2,
+        choices=[1, 2],
+        help=(
+            "energy combination order: 1 = plain MFCC (sum blocks - sum caps, "
+            "~1.24 eV/cut cap error); 2 = MFCC + 2-body MBE over joined dimers "
+            "(restores the per-cut interaction; default). Order 2 emits one "
+            "dimer job per cut."
+        ),
+    )
+    ap.add_argument(
+        "--solution-method",
+        default="ntpoly",
+        choices=["ntpoly", "diagonali"],
+        help=(
+            "SIESTA density-matrix solver for blocks/dimers/full-baseline "
+            "(ntpoly = production sparse solver; diagonali = LAPACK, for small "
+            "local verification). Caps are always tiny H2 jobs run with "
+            "diagonali."
+        ),
+    )
     ap.add_argument("--hosts", nargs="+", default=DEFAULT_HOSTS)
     ap.add_argument("--num-numa", type=int, default=16, help="NUMAs per node")
     ap.add_argument("--cores-per-numa", type=int, default=38, help="cores per NUMA")
@@ -189,6 +225,8 @@ def _build_fragments(mol: Molecule, n_c: int, args):
         "cuts": cuts,
         "blocks": [],
         "caps": [],
+        "dimers": [],
+        "mbe_order": getattr(args, "mbe_order", 2),
     }
 
     block_mols = []
@@ -232,7 +270,48 @@ def _build_fragments(mol: Molecule, n_c: int, args):
         cap_mols.append(cap)
         schedule["caps"].append({"cap_id": idx, "natoms": cap.natoms, "host": args.hosts[0]})
 
-    return schedule, block_mols, cap_mols
+    # Joined dimers for the MBE(2) correction. Cut k joins block k and block k+1
+    # (real C-C bond at cut k restored, capped only at the *outer* boundaries —
+    # the same cap placement those two blocks already carry). The per-cut
+    # increment E(dimer_k) - E(block_k) - E(block_{k+1}) + E(cap_k) restores the
+    # interaction MFCC(1) misses; the cap terms cancel over all cuts, leaving
+    # E^(2) = Σ E(block) + Σ_k [E(dimer_k) - E(block_k) - E(block_{k+1})].
+    # Without these, the combiner falls back to plain MFCC(1) (~1.24 eV/cut).
+    dimer_mols = []
+    if getattr(args, "mbe_order", 2) >= 2:
+        for k in range(args.num_nodes - 1):
+            carbons = cs[edges[k] : edges[k + 2]]
+            cset = set(carbons)
+            atoms = list(carbons) + [h for h in h_idx if h_to_c[h] in cset]
+            els = [mol.elements[a] for a in atoms]
+            co = coords[atoms].tolist()
+            m = Molecule(list(els), np.array(co, dtype=float), label=f"dimer_{k:04d}")
+            caps_added = 0
+            if k > 0:  # left outer boundary = cut k-1
+                c0 = carbons[0]
+                prev = cs[edges[k] - 1]
+                m.append("H", _cap_pos(coords[c0], coords[prev]))
+                caps_added += 1
+            if k < args.num_nodes - 2:  # right outer boundary = cut k+1
+                cN = carbons[-1]
+                nxt = cs[edges[k + 2]]
+                m.append("H", _cap_pos(coords[cN], coords[nxt]))
+                caps_added += 1
+            dimer_mols.append(m)
+            schedule["dimers"].append(
+                {
+                    "dimer_id": k,
+                    "cut": list(cuts[k]),
+                    "left_block": k,
+                    "right_block": k + 1,
+                    "host": args.hosts[k % args.num_nodes],
+                    "natoms": m.natoms,
+                    "carbons": len(carbons),
+                    "caps_added": caps_added,
+                }
+            )
+
+    return schedule, block_mols, cap_mols, dimer_mols
 
 
 def _slot_ranges(args):
@@ -244,8 +323,9 @@ def _slot_ranges(args):
     return slots
 
 
-def _write_inputs(out: Path, full_mol, block_mols, cap_mols, args):
+def _write_inputs(out: Path, full_mol, block_mols, cap_mols, dimer_mols, args):
     pseudo_dir = Path(args.pseudo_dir)
+    solver = getattr(args, "solution_method", "ntpoly")
     for b, mol in enumerate(block_mols):
         block_dir = out / f"block_{b:04d}"
         block_dir.mkdir(parents=True, exist_ok=True)
@@ -254,10 +334,25 @@ def _write_inputs(out: Path, full_mol, block_mols, cap_mols, args):
             block_dir / "input.fdf",
             basis_size=args.basis,
             mesh_cutoff_ry=args.mesh_cutoff_ry,
-            solution_method="ntpoly",
+            solution_method=solver,
         )
         for el in set(mol.elements):
             shutil.copy2(pseudo_dir / f"{el}.psf", block_dir / f"{el}.psf")
+
+    # Joined dimers (~2x a block): same sparse solver as the blocks so the
+    # dimer energy is directly comparable in the MBE(2) sum.
+    for k, mol in enumerate(dimer_mols):
+        dimer_dir = out / f"dimer_{k:04d}"
+        dimer_dir.mkdir(parents=True, exist_ok=True)
+        write_siesta_fdf(
+            mol,
+            dimer_dir / "input.fdf",
+            basis_size=args.basis,
+            mesh_cutoff_ry=args.mesh_cutoff_ry,
+            solution_method=solver,
+        )
+        for el in set(mol.elements):
+            shutil.copy2(pseudo_dir / f"{el}.psf", dimer_dir / f"{el}.psf")
 
     for c, mol in enumerate(cap_mols):
         cap_dir = out / f"cap_{c:04d}"
@@ -273,7 +368,7 @@ def _write_inputs(out: Path, full_mol, block_mols, cap_mols, args):
             shutil.copy2(pseudo_dir / f"{el}.psf", cap_dir / f"{el}.psf")
 
     # Unfragmented full-chain baseline (MFCC reference energy). Same numerical
-    # settings as the blocks (ntpoly) so E_full is directly comparable to E_mfcc.
+    # settings as the blocks so E_full is directly comparable to E_mfcc/E_mbe2.
     full_dir = out / "full"
     full_dir.mkdir(parents=True, exist_ok=True)
     write_siesta_fdf(
@@ -281,7 +376,7 @@ def _write_inputs(out: Path, full_mol, block_mols, cap_mols, args):
         full_dir / "input.fdf",
         basis_size=args.basis,
         mesh_cutoff_ry=args.mesh_cutoff_ry,
-        solution_method="ntpoly",
+        solution_method=solver,
     )
     for el in set(full_mol.elements):
         shutil.copy2(pseudo_dir / f"{el}.psf", full_dir / f"{el}.psf")
@@ -455,6 +550,16 @@ for ((i=0;i<{args.num_nodes};i++)); do
 done
 wait
 
+# MBE(2) joined dimers: one per cut, run after the blocks free the nodes.
+NUM_CUTS=$(( {args.num_nodes} - 1 ))
+for ((k=0;k<NUM_CUTS;k++)); do
+  h=${{HOSTS[$k % {args.num_nodes}]}}
+  dmr=$(printf "dimer_%04d" "$k")
+  ssh "{ssh_user}$h" "cd '$REMOTE_OUT_DIR/$dmr' && bash ./run_local.sh" \
+    > "$LOG_DIR/$dmr.$h.log" 2>&1 &
+done
+wait
+
 ssh "{ssh_user}${{CAP_HOST}}" "cd '$REMOTE_OUT_DIR' && for d in cap_*; do (cd \\\"\$d\\\" && bash ./run_local.sh); done" \
   > "$LOG_DIR/caps.$CAP_HOST.log" 2>&1
 
@@ -486,46 +591,93 @@ def main():
     schedule = json.loads((root / "schedule.json").read_text())
     num_nodes = schedule["num_nodes"]
     num_caps = max(0, num_nodes - 1)
+    num_dimers = len(schedule.get("dimers", []))
 
     block_rows = []
     cap_rows = []
+    dimer_rows = []
     missing = []
 
     for i in range(num_nodes):
         block_dir = root / f"block_{i:04d}"
         energy = parse_energy(block_dir / "siesta.out")
-        row = {"block_id": i, "energy_ev": energy}
-        block_rows.append(row)
+        block_rows.append({"block_id": i, "energy_ev": energy})
         if energy is None:
             missing.append(str(block_dir / "siesta.out"))
 
     for i in range(num_caps):
         cap_dir = root / f"cap_{i:04d}"
         energy = parse_energy(cap_dir / "siesta.out")
-        row = {"cap_id": i, "energy_ev": energy}
-        cap_rows.append(row)
+        cap_rows.append({"cap_id": i, "energy_ev": energy})
         if energy is None:
             missing.append(str(cap_dir / "siesta.out"))
 
-    block_energies = [r["energy_ev"] for r in block_rows if r["energy_ev"] is not None]
-    cap_energies = [r["energy_ev"] for r in cap_rows if r["energy_ev"] is not None]
-    e_mfcc = None
-    if len(block_energies) == num_nodes and len(cap_energies) == num_caps:
-        e_mfcc = sum(block_energies) - sum(cap_energies)
+    for i in range(num_dimers):
+        dimer_dir = root / f"dimer_{i:04d}"
+        energy = parse_energy(dimer_dir / "siesta.out")
+        dimer_rows.append({"dimer_id": i, "energy_ev": energy})
+        if energy is None:
+            missing.append(str(dimer_dir / "siesta.out"))
+
+    block_e = [r["energy_ev"] for r in block_rows]
+    cap_e = [r["energy_ev"] for r in cap_rows]
+    dimer_e = [r["energy_ev"] for r in dimer_rows]
+    have_blocks = len(block_e) == num_nodes and all(e is not None for e in block_e)
+    have_caps = len(cap_e) == num_caps and all(e is not None for e in cap_e)
+    have_dimers = num_dimers > 0 and all(e is not None for e in dimer_e)
+
+    # MFCC(1): Σ E(block) − Σ E(cap). Plain H-cap MFCC carries ~1.24 eV/cut;
+    # this is kept only as the uncorrected reference.
+    e_mfcc = (sum(block_e) - sum(cap_e)) if (have_blocks and have_caps) else None
+
+    # MBE(2): for each cut k (between block k and block k+1) the joined dimer
+    # restores the real bond, giving the increment
+    #   Δ_k = E(dimer_k) − E(block_k) − E(block_{k+1}) + E(cap_k)
+    # (the +cap_k un-subtracts the cap that no longer exists in the dimer; the
+    # cap terms cancel exactly over all cuts). E^(2) = E_mfcc + Σ Δ_k. With no
+    # dimers we cannot form MBE(2) and fall back to MFCC(1) — flagged below.
+    e_mbe2 = None
+    increments = []
+    if have_blocks and have_caps and have_dimers and num_dimers == num_caps:
+        e_mbe2 = e_mfcc
+        for k in range(num_dimers):
+            inc = dimer_e[k] - block_e[k] - block_e[k + 1] + cap_e[k]
+            increments.append({"cut": k, "increment_ev": inc})
+            e_mbe2 += inc
+
+    if e_mbe2 is not None:
+        method, e_total = "MBE(2)", e_mbe2
+    elif e_mfcc is not None:
+        method, e_total = "MFCC(1) (no dimers — run dimer_* jobs to apply MBE(2))", e_mfcc
+    else:
+        method, e_total = None, None
 
     summary = {
         "num_nodes": num_nodes,
         "num_caps": num_caps,
+        "num_dimers": num_dimers,
+        "method": method,
+        "E_total_ev": e_total,
         "E_mfcc_ev": e_mfcc,
+        "E_mbe2_ev": e_mbe2,
+        "mbe2_corrections_ev": increments,
         "missing_outputs": missing,
         "blocks": block_rows,
         "caps": cap_rows,
+        "dimers": dimer_rows,
     }
     (root / "weak_scaling_results.json").write_text(json.dumps(summary, indent=2) + "\\n")
 
+    print("method =", method)
     print("blocks =", block_rows)
     print("caps   =", cap_rows)
-    print("E_MFCC =", e_mfcc)
+    print("dimers =", dimer_rows)
+    print("E_MFCC(1) =", e_mfcc)
+    print("E_MBE(2)  =", e_mbe2)
+    if increments:
+        for inc in increments:
+            print(f"  cut {inc['cut']}: +{inc['increment_ev']:.6f} eV")
+    print("E_total  =", e_total)
     print("results ->", root / "weak_scaling_results.json")
 
 
@@ -555,6 +707,9 @@ def _write_launch_artifacts(out: Path, schedule, args):
         _write(out / f"block_{b:04d}" / "run_local.sh", _render_block_runner(slots, args), 0o755)
     for c in range(len(schedule["caps"])):
         _write(out / f"cap_{c:04d}" / "run_local.sh", _render_cap_runner(slots, args), 0o755)
+    # Joined dimers run like blocks (full-node ntpoly job).
+    for k in range(len(schedule.get("dimers", []))):
+        _write(out / f"dimer_{k:04d}" / "run_local.sh", _render_block_runner(slots, args), 0o755)
     # Unfragmented baseline: launch on one node like a block (ntpoly).
     _write(out / "full" / "run_local.sh", _render_block_runner(slots, args), 0o755)
 
@@ -584,8 +739,8 @@ def main():
     )
     print(f"generated {mol.natoms} atoms", flush=True)
 
-    schedule, block_mols, cap_mols = _build_fragments(mol, n_c, args)
-    _write_inputs(out, mol, block_mols, cap_mols, args)
+    schedule, block_mols, cap_mols, dimer_mols = _build_fragments(mol, n_c, args)
+    _write_inputs(out, mol, block_mols, cap_mols, dimer_mols, args)
     _write_launch_artifacts(out, schedule, args)
 
     print(f"\n{args.num_nodes} blocks (capped, MFCC-style):", flush=True)
@@ -597,6 +752,28 @@ def main():
             flush=True,
         )
     print(f"{len(cap_mols)} conjugate caps (H2, serial reference jobs)", flush=True)
+    if dimer_mols:
+        print(
+            f"{len(dimer_mols)} joined dimers (MBE(2), one per cut; ~2x block size):",
+            flush=True,
+        )
+        for d in schedule["dimers"]:
+            print(
+                f"  dimer {d['dimer_id']}: cut {d['cut']} (blocks "
+                f"{d['left_block']}+{d['right_block']}) | host {d['host']} | "
+                f"{d['natoms']} atoms, {d['carbons']} C, {d['caps_added']} cap H",
+                flush=True,
+            )
+        print(
+            "  combine_results.py applies MBE(2): "
+            "E = Σ blocks − Σ caps + Σ_c [E(dimer_c) − E(block) − E(cap)]",
+            flush=True,
+        )
+    else:
+        print(
+            "MBE order 1: no dimers — combiner uses plain MFCC(1) (~1.24 eV/cut).",
+            flush=True,
+        )
     print(f"full-chain baseline (unfragmented, ntpoly) -> {out / 'full'}", flush=True)
     print(f"\nschedule                -> {out / 'schedule.json'}")
     print(f"recommended launcher    -> {out / 'submit_per_node_local.sh'}")
