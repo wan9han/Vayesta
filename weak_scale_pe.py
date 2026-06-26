@@ -133,6 +133,26 @@ def _parse_args():
             "diagonali."
         ),
     )
+    ap.add_argument(
+        "--block-slice-num",
+        type=int,
+        default=1,
+        help=(
+            "NTPOLY_SLICE_NUM baked into each block (and full-baseline) "
+            "run_local.sh. Default 1; raise to split the density-matrix "
+            "purification for large blocks."
+        ),
+    )
+    ap.add_argument(
+        "--dimer-slice-num",
+        type=int,
+        default=1,
+        help=(
+            "NTPOLY_SLICE_NUM baked into each dimer run_local.sh. Default 1; "
+            "dimers are ~2x a block so usually warrant a higher value than "
+            "blocks at the same per-node atom count."
+        ),
+    )
     ap.add_argument("--hosts", nargs="+", default=DEFAULT_HOSTS)
     ap.add_argument("--num-numa", type=int, default=16, help="NUMAs per node")
     ap.add_argument("--cores-per-numa", type=int, default=38, help="cores per NUMA")
@@ -442,35 +462,6 @@ ulimit -s unlimited
 """
 
 
-# NTPOLY_SLICE_NUM grows with task size: each slice covers ~16000 orbitals
-# (~8000 task atoms), keeping each slice's working set in HBM. Thresholds are in
-# block atom count (atoms_per_node); a dimer is ~2x a block, so its threshold is
-# half the block's at every tier. Comparison is STRICT (>), so the boundary value
-# itself stays at the lower slice:
-#   slice 1 -> 2 : dimer>4000,  block>8000    (matrix > ~16000 orbitals)
-#   slice 2 -> 3 : dimer>8000,  block>16000   (matrix > ~32000 orbitals)
-_DIMER_SLICE2_ATOMS = 4000
-_BLOCK_SLICE2_ATOMS = 8000
-_DIMER_SLICE3_ATOMS = 8000
-_BLOCK_SLICE3_ATOMS = 16000
-
-
-def _ntpoly_slice_num(kind, atoms_per_node):
-    """NTPOLY_SLICE_NUM (1, 2, or 3) for a ``kind`` task ('block' or 'dimer').
-
-    Returns the next higher slice only when ``atoms_per_node`` is strictly above
-    that tier's threshold.
-    """
-    if kind == "dimer":
-        if atoms_per_node > _DIMER_SLICE3_ATOMS:
-            return 3
-        return 2 if atoms_per_node > _DIMER_SLICE2_ATOMS else 1
-    # block
-    if atoms_per_node > _BLOCK_SLICE3_ATOMS:
-        return 3
-    return 2 if atoms_per_node > _BLOCK_SLICE2_ATOMS else 1
-
-
 def _render_block_runner(slots, args, procs=None, ntpoly_slice_num=1):
     if procs is None:
         procs = args.procs_per_node
@@ -731,6 +722,11 @@ if __name__ == "__main__":
 
 def _write_launch_artifacts(out: Path, schedule, args):
     slots = _slot_ranges(args)
+    # Record the per-task NTPOLY_SLICE_NUM so a generated run is reproducible /
+    # inspectable. Read straight from the CLI; default 1 each.
+    block_slice = getattr(args, "block_slice_num", 1)
+    dimer_slice = getattr(args, "dimer_slice_num", 1)
+    schedule["ntpoly_slice_num"] = {"block": block_slice, "dimer": dimer_slice}
     _write(out / "schedule.json", json.dumps(schedule, indent=2) + "\n")
     _write(out / "honpas_env.sh", _render_env_script(args), 0o755)
     _write(out / "combine_results.py", _render_combine_script(), 0o755)
@@ -746,11 +742,7 @@ def _write_launch_artifacts(out: Path, schedule, args):
         rf.append(f"rank {i}=__HOST__ slots={lo}-{hi}")
     _write(out / "rankfile_template.txt", "\n".join(rf) + "\n")
 
-    # NTPOLY_SLICE_NUM is bumped (to 2, then 3) as a task's matrix grows: dimers
-    # are ~2x a block so they cross each threshold at a smaller atom count.
-    apn = getattr(args, "atoms_per_node", 0)
-    block_slice = _ntpoly_slice_num("block", apn)
-    dimer_slice = _ntpoly_slice_num("dimer", apn)
+    # block_slice / dimer_slice are read from the CLI above (default 1).
     for b in range(schedule["num_nodes"]):
         _write(
             out / f"block_{b:04d}" / "run_local.sh",
@@ -780,6 +772,9 @@ def main():
         raise SystemExit(
             f"gen script not found: {args.gen_script}"
         )
+    for name in ("block_slice_num", "dimer_slice_num"):
+        if getattr(args, name) < 1:
+            raise SystemExit(f"--{name.replace('_', '-')} must be >= 1, got {getattr(args, name)}")
     if args.omp_threads is None:
         args.omp_threads = args.cores_per_numa - args.skip_cores
     out = Path(args.out_dir)
@@ -831,6 +826,11 @@ def main():
             flush=True,
         )
     print(f"full-chain baseline (unfragmented, ntpoly) -> {out / 'full'}", flush=True)
+    print(
+        f"NTPOLY_SLICE_NUM        -> block={args.block_slice_num}, "
+        f"dimer={args.dimer_slice_num}",
+        flush=True,
+    )
     print(f"\nschedule                -> {out / 'schedule.json'}")
     print(f"recommended launcher    -> {out / 'submit_per_node_local.sh'}")
     print(f"legacy launcher         -> {out / 'launch_head_mpirun.sh'}")
