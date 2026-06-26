@@ -442,24 +442,33 @@ ulimit -s unlimited
 """
 
 
-# NTPOLY_SLICE_NUM bumps from 1 -> 2 once a task's density-matrix purification
-# gets large enough to benefit from an extra slice (keeps each slice's working
-# set in HBM). Thresholds are in block atom count (atoms_per_node); a dimer is
-# ~2x a block, so to slice at the same matrix dimension (~16000 orbitals) it
-# trips at half the block's atom count. Comparison is STRICT: the boundary
-# value itself does not trigger slicing (dimer>4000, block>8000).
-_DIMER_SLICE_ATOMS = 4000
-_BLOCK_SLICE_ATOMS = 8000
+# NTPOLY_SLICE_NUM grows with task size: each slice covers ~16000 orbitals
+# (~8000 task atoms), keeping each slice's working set in HBM. Thresholds are in
+# block atom count (atoms_per_node); a dimer is ~2x a block, so its threshold is
+# half the block's at every tier. Comparison is STRICT (>), so the boundary value
+# itself stays at the lower slice:
+#   slice 1 -> 2 : dimer>4000,  block>8000    (matrix > ~16000 orbitals)
+#   slice 2 -> 3 : dimer>8000,  block>16000   (matrix > ~32000 orbitals)
+_DIMER_SLICE2_ATOMS = 4000
+_BLOCK_SLICE2_ATOMS = 8000
+_DIMER_SLICE3_ATOMS = 8000
+_BLOCK_SLICE3_ATOMS = 16000
 
 
 def _ntpoly_slice_num(kind, atoms_per_node):
-    """NTPOLY_SLICE_NUM (1 or 2) for a ``kind`` task ('block' or 'dimer').
+    """NTPOLY_SLICE_NUM (1, 2, or 3) for a ``kind`` task ('block' or 'dimer').
 
-    Slices (returns 2) only when ``atoms_per_node`` is strictly above the
-    threshold for this task kind.
+    Returns the next higher slice only when ``atoms_per_node`` is strictly above
+    that tier's threshold.
     """
-    threshold = _DIMER_SLICE_ATOMS if kind == "dimer" else _BLOCK_SLICE_ATOMS
-    return 2 if atoms_per_node > threshold else 1
+    if kind == "dimer":
+        if atoms_per_node > _DIMER_SLICE3_ATOMS:
+            return 3
+        return 2 if atoms_per_node > _DIMER_SLICE2_ATOMS else 1
+    # block
+    if atoms_per_node > _BLOCK_SLICE3_ATOMS:
+        return 3
+    return 2 if atoms_per_node > _BLOCK_SLICE2_ATOMS else 1
 
 
 def _render_block_runner(slots, args, procs=None, ntpoly_slice_num=1):
@@ -737,8 +746,8 @@ def _write_launch_artifacts(out: Path, schedule, args):
         rf.append(f"rank {i}=__HOST__ slots={lo}-{hi}")
     _write(out / "rankfile_template.txt", "\n".join(rf) + "\n")
 
-    # NTPOLY_SLICE_NUM is bumped to 2 once a task's matrix gets large: dimers are
-    # ~2x a block so they cross the threshold at a smaller per-node atom count.
+    # NTPOLY_SLICE_NUM is bumped (to 2, then 3) as a task's matrix grows: dimers
+    # are ~2x a block so they cross each threshold at a smaller atom count.
     apn = getattr(args, "atoms_per_node", 0)
     block_slice = _ntpoly_slice_num("block", apn)
     dimer_slice = _ntpoly_slice_num("dimer", apn)
