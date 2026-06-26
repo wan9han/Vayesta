@@ -121,6 +121,14 @@ def write_siesta_fdf(
     rows, index = _species_table(mol.elements)
     lo, hi = mol.bbox()
     cell = (hi - lo) + 2.0 * cell_margin  # orthorhombic vacuum box
+    # Center the molecule in the vacuum box: coords -= bbox_min + margin.
+    # Translation-invariant (identical energy), but essential for fragments deep
+    # in a long chain -- their atoms sit at huge absolute coordinates (tens of
+    # thousands of A) which, written raw into a small bbox+margin cell, crash
+    # SIESTA's grid / sparse-pattern decomposition (segfault or
+    # "Sparse pattern is oversubscribed with nodes"). Caps are hit first because
+    # they are tiny (2 orbitals).
+    shifted = mol.coords - lo + cell_margin
 
     lines: List[str] = []
     lines.append(f"SystemLabel      {mol.label}")
@@ -133,7 +141,7 @@ def write_siesta_fdf(
     lines.append("")
     lines.append("AtomicCoordinatesFormat NotScaledCartesianAng")
     lines.append("%block AtomicCoordinatesAndAtomicSpecies")
-    for el, (x, y, z) in zip(mol.elements, mol.coords):
+    for el, (x, y, z) in zip(mol.elements, shifted):
         lines.append(f"    {x:18.12f}   {y:18.12f}   {z:18.12f}    {index[el]}")
     lines.append("%endblock AtomicCoordinatesAndAtomicSpecies")
     lines.append("")
