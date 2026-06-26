@@ -95,6 +95,8 @@ python3 weak_scale_pe.py \
 - `--out-dir`：当前机器写出的目录
 - `--remote-out-dir`：远端节点实际看到的共享目录路径
 - `--ssh-user`：可选，指定 `ssh` 登录用户名
+- `--block-slice-num`：写进每个 block（及 full 基线）`run_local.sh` 的 `NTPOLY_SLICE_NUM`，默认 1
+- `--dimer-slice-num`：写进每个 dimer `run_local.sh` 的 `NTPOLY_SLICE_NUM`，默认 1
 
 ### 4.2 如果要改用别的 PE 生成脚本
 
@@ -115,13 +117,32 @@ python3 weak_scale_pe.py \
   --env-sh /share/honpas/xxx/siesta-20260520/env.sh
 ```
 
-### 4.4 如果节点列表不是默认 8 台
+### 4.4 如果节点列表不是默认 16 台
+
+默认 `--hosts` 内置 16 个节点（`71.20.27.21-36` 和 `71.20.16.{12,22,32,42,132,142,152,162}`）。要换一批时：
 
 ```bash
   --hosts 71.20.27.21 71.20.27.22 71.20.27.23 71.20.27.24
 ```
 
 `--num-nodes` 不能大于 `--hosts` 提供的机器数量。
+
+### 4.5 NTPOLY 切片数（`--block-slice-num` / `--dimer-slice-num`）
+
+`NTPOLY_SLICE_NUM` 控制密度矩阵纯化（TRS2）把矩阵切成几片，目的是让单片工作集放进 HBM。脚本在生成时用**两个变量分别描述 block 和 dimer 这两个过程**：
+
+- `--block-slice-num N`：写进每个 block（以及 full 基线）`run_local.sh` 的 `NTPOLY_SLICE_NUM`
+- `--dimer-slice-num N`：写进每个 dimer `run_local.sh` 的 `NTPOLY_SLICE_NUM`（dimer ≈ 2× block，同样每节点原子数下通常需要比 block 更大的切片数）
+
+两者**不指定时默认都是 1**，且必须 ≥1。所选值会写进 `schedule.json` 的 `ntpoly_slice_num` 字段，并在生成时打印一行 `NTPOLY_SLICE_NUM -> block=.., dimer=..`。cap 是 H₂ 小任务、用 diagonali，固定为 1，不受这两个参数影响。
+
+例如大体系给 block 用 2、dimer 用 3：
+
+```bash
+python3 weak_scale_pe.py ... --block-slice-num 2 --dimer-slice-num 3
+```
+
+具体取值取决于每节点 HBM 容量；建议借助 SIESTA 内置计时器（`UseTreeTimer` 等，已在生成的 FDF 中默认开启）实测求解时间和内存占用后再定档，切片过多反而因通信开销变慢。
 
 ## 5. 生成后目录里有什么
 
