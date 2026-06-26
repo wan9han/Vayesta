@@ -1,2 +1,10 @@
 __pycache__/
 *.pyc
+
+# SIESTA scratch files (only appear if siesta is run from the repo dir; runs
+# normally live in dedicated work/output dirs, not here)
+CLOCK
+MESSAGES
+INPUT_TMP.*
+*.alloc
+fdf.*.log
