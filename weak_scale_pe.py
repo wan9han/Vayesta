@@ -444,16 +444,22 @@ ulimit -s unlimited
 
 # NTPOLY_SLICE_NUM bumps from 1 -> 2 once a task's density-matrix purification
 # gets large enough to benefit from an extra slice (keeps each slice's working
-# set in HBM). Dimers are ~2x a block, so they cross the threshold at a smaller
-# per-node atom count than blocks do.
-_DIMER_SLICE_ATOMS = 2000
+# set in HBM). Thresholds are in block atom count (atoms_per_node); a dimer is
+# ~2x a block, so to slice at the same matrix dimension (~16000 orbitals) it
+# trips at half the block's atom count. Comparison is STRICT: the boundary
+# value itself does not trigger slicing (dimer>4000, block>8000).
+_DIMER_SLICE_ATOMS = 4000
 _BLOCK_SLICE_ATOMS = 8000
 
 
 def _ntpoly_slice_num(kind, atoms_per_node):
-    """NTPOLY_SLICE_NUM (1 or 2) for a ``kind`` task ('block' or 'dimer')."""
+    """NTPOLY_SLICE_NUM (1 or 2) for a ``kind`` task ('block' or 'dimer').
+
+    Slices (returns 2) only when ``atoms_per_node`` is strictly above the
+    threshold for this task kind.
+    """
     threshold = _DIMER_SLICE_ATOMS if kind == "dimer" else _BLOCK_SLICE_ATOMS
-    return 2 if atoms_per_node >= threshold else 1
+    return 2 if atoms_per_node > threshold else 1
 
 
 def _render_block_runner(slots, args, procs=None, ntpoly_slice_num=1):
