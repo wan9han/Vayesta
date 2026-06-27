@@ -36,6 +36,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -225,10 +226,19 @@ def _build_fragments(mol: Molecule, n_c: int, args):
     cs.sort(key=lambda i: (coords[i, 0], coords[i, 1], coords[i, 2]))
     cpos = coords[cs]
     h_idx = [i for i, e in enumerate(mol.elements) if e == "H"]
+    # Map each H to its nearest C. The original brute-force was O(n_H * n_C) = O(N^2)
+    # (a Python loop, one all-carbon norm per H), which dominates system generation
+    # and becomes infeasible at E-scale. cKDTree gives the SAME nearest-carbon result
+    # (query k=1 == argmin over Euclidean norm; C-H bonds are unique, no ties) in
+    # O(N log N). See 生成优化文档.md.
     h_to_c = {}
-    for h in h_idx:
-        d = np.linalg.norm(cpos - coords[h], axis=1)
-        h_to_c[h] = cs[int(np.argmin(d))]
+    if h_idx:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(cpos)
+        _, nn = tree.query(coords[h_idx], k=1)
+        nn = np.atleast_1d(nn)
+        for h, j in zip(h_idx, nn):
+            h_to_c[h] = cs[int(j)]
 
     edges = [round(k * len(cs) / args.num_nodes) for k in range(args.num_nodes + 1)]
 
@@ -607,6 +617,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 
 TOTAL_RE = re.compile(r"^\\s*siesta:.*Total\\s*=\\s*(-?\\d+\\.\\d+)", re.MULTILINE)
@@ -621,6 +632,7 @@ def parse_energy(path: Path):
 
 
 def main():
+    _t0 = time.perf_counter()
     root = Path(__file__).resolve().parent
     schedule = json.loads((root / "schedule.json").read_text())
     num_nodes = schedule["num_nodes"]
@@ -702,6 +714,7 @@ def main():
     }
     (root / "weak_scaling_results.json").write_text(json.dumps(summary, indent=2) + "\\n")
 
+    print(f"[combine-time] parse+sum = {time.perf_counter()-_t0:.3f}s  ({num_nodes} blocks, {num_caps} caps, {num_dimers} dimers)")
     print("method =", method)
     print("blocks =", block_rows)
     print("caps   =", cap_rows)
@@ -781,7 +794,9 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
 
     target_atoms = args.atoms_per_node * args.num_nodes
+    _t0 = time.perf_counter()
     mol, n_c = _generate_chain(args)
+    _t1 = time.perf_counter()
     real_atoms = 3 * n_c + 2
     print(
         f"target {target_atoms} atoms -> C{n_c}H{2*n_c+2} = {real_atoms} atoms; "
@@ -791,8 +806,19 @@ def main():
     print(f"generated {mol.natoms} atoms", flush=True)
 
     schedule, block_mols, cap_mols, dimer_mols = _build_fragments(mol, n_c, args)
+    _t2 = time.perf_counter()
     _write_inputs(out, mol, block_mols, cap_mols, dimer_mols, args)
+    _t3 = time.perf_counter()
     _write_launch_artifacts(out, schedule, args)
+    _t4 = time.perf_counter()
+    print(
+        f"[gen-time] chain={_t1-_t0:.2f}s  "
+        f"fragments(h_to_c+build)={_t2-_t1:.2f}s  "
+        f"write_inputs={_t3-_t2:.2f}s  "
+        f"write_artifacts={_t4-_t3:.2f}s  "
+        f"total={_t4-_t0:.2f}s",
+        flush=True,
+    )
 
     print(f"\n{args.num_nodes} blocks (capped, MFCC-style):", flush=True)
     for block in schedule["blocks"]:
