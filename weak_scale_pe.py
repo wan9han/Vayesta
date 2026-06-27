@@ -112,6 +112,27 @@ def _parse_args():
     ap.add_argument("--basis", default="SZ")
     ap.add_argument("--mesh-cutoff-ry", type=float, default=100.0)
     ap.add_argument(
+        "--shared-pseudo",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Share pseudos via symlink to one real copy under _pseudos/ instead "
+            "of copying ~260 KB into every block/dimer/cap/full dir (saves GBs "
+            "at scale). Default on; --no-shared-pseudo restores per-dir copies."
+        ),
+    )
+    ap.add_argument(
+        "--full-baseline",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Generate the unfragmented full-chain baseline dir (MFCC reference). "
+            "Default on; --no-full-baseline skips it (recommended at E-scale, "
+            "where SIESTA cannot run the full chain anyway and its FDF alone is "
+            "~13 GB at 22680 nodes)."
+        ),
+    )
+    ap.add_argument(
         "--mbe-order",
         type=int,
         default=2,
@@ -361,63 +382,56 @@ def _slot_ranges(args):
     return slots
 
 
+def _place_pseudo(el, pseudo_dir, job_dir, shared_dir, shared):
+    """Put pseudo ``el``.psf into job_dir. If ``shared``, symlink to a single
+    real copy under shared_dir (saves duplicating ~260 KB/dir -> GBs at scale);
+    otherwise copy into the dir as before."""
+    src = Path(pseudo_dir) / f"{el}.psf"
+    dst = job_dir / f"{el}.psf"
+    if dst.is_symlink() or dst.exists():
+        dst.unlink()
+    if shared:
+        shared_file = shared_dir / f"{el}.psf"
+        if not shared_file.exists():
+            shutil.copy2(src, shared_file)  # one real copy, reused by every job
+        dst.symlink_to(os.path.relpath(shared_file, job_dir))
+    else:
+        shutil.copy2(src, dst)
+
+
 def _write_inputs(out: Path, full_mol, block_mols, cap_mols, dimer_mols, args):
     pseudo_dir = Path(args.pseudo_dir)
     solver = getattr(args, "solution_method", "ntpoly")
-    for b, mol in enumerate(block_mols):
-        block_dir = out / f"block_{b:04d}"
-        block_dir.mkdir(parents=True, exist_ok=True)
+    shared = getattr(args, "shared_pseudo", False)
+    shared_dir = out / "_pseudos"
+    if shared:
+        shared_dir.mkdir(parents=True, exist_ok=True)
+
+    def fdf_and_pseudos(mol, job_dir, force_solver=None):
+        job_dir.mkdir(parents=True, exist_ok=True)
         write_siesta_fdf(
             mol,
-            block_dir / "input.fdf",
+            job_dir / "input.fdf",
             basis_size=args.basis,
             mesh_cutoff_ry=args.mesh_cutoff_ry,
-            solution_method=solver,
+            solution_method=force_solver or solver,
         )
         for el in set(mol.elements):
-            shutil.copy2(pseudo_dir / f"{el}.psf", block_dir / f"{el}.psf")
+            _place_pseudo(el, pseudo_dir, job_dir, shared_dir, shared)
 
+    for b, mol in enumerate(block_mols):
+        fdf_and_pseudos(mol, out / f"block_{b:04d}")
     # Joined dimers (~2x a block): same sparse solver as the blocks so the
     # dimer energy is directly comparable in the MBE(2) sum.
     for k, mol in enumerate(dimer_mols):
-        dimer_dir = out / f"dimer_{k:04d}"
-        dimer_dir.mkdir(parents=True, exist_ok=True)
-        write_siesta_fdf(
-            mol,
-            dimer_dir / "input.fdf",
-            basis_size=args.basis,
-            mesh_cutoff_ry=args.mesh_cutoff_ry,
-            solution_method=solver,
-        )
-        for el in set(mol.elements):
-            shutil.copy2(pseudo_dir / f"{el}.psf", dimer_dir / f"{el}.psf")
-
+        fdf_and_pseudos(mol, out / f"dimer_{k:04d}")
     for c, mol in enumerate(cap_mols):
-        cap_dir = out / f"cap_{c:04d}"
-        cap_dir.mkdir(parents=True, exist_ok=True)
-        write_siesta_fdf(
-            mol,
-            cap_dir / "input.fdf",
-            basis_size=args.basis,
-            mesh_cutoff_ry=args.mesh_cutoff_ry,
-            solution_method="diagonali",
-        )
-        for el in set(mol.elements):
-            shutil.copy2(pseudo_dir / f"{el}.psf", cap_dir / f"{el}.psf")
-
+        fdf_and_pseudos(mol, out / f"cap_{c:04d}", force_solver="diagonali")
     # Unfragmented full-chain baseline (MFCC reference energy). Same numerical
-    # settings as the blocks so E_full is directly comparable to E_mfcc/E_mbe2.
-    full_dir = out / "full"
-    full_dir.mkdir(parents=True, exist_ok=True)
-    write_siesta_fdf(
-        full_mol,
-        full_dir / "input.fdf",
-        basis_size=args.basis,
-        mesh_cutoff_ry=args.mesh_cutoff_ry,
-        solution_method=solver,
-    )
-    for el in set(full_mol.elements):
-        shutil.copy2(pseudo_dir / f"{el}.psf", full_dir / f"{el}.psf")
+    # settings as the blocks so E_full is directly comparable. Skippable at
+    # E-scale (SIESTA cannot run it anyway) via --no-full-baseline.
+    if getattr(args, "full_baseline", True):
+        fdf_and_pseudos(full_mol, out / "full")
 
 
 def _render_env_script(args):
