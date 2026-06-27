@@ -261,6 +261,14 @@ def _build_fragments(mol: Molecule, n_c: int, args):
         for h, j in zip(h_idx, nn):
             h_to_c[h] = cs[int(j)]
 
+    # Invert h_to_c once (O(N)): carbon -> list of its H. Lets each block/dimer
+    # gather its H in O(#carbons-in-segment) instead of scanning all H per
+    # segment (which was O(num_segments * n_H) = O(N^2) and dominated at scale).
+    from collections import defaultdict
+    h_by_carbon = defaultdict(list)
+    for h in h_idx:
+        h_by_carbon[h_to_c[h]].append(h)
+
     edges = [round(k * len(cs) / args.num_nodes) for k in range(args.num_nodes + 1)]
 
     def carbon_block(b):
@@ -291,8 +299,7 @@ def _build_fragments(mol: Molecule, n_c: int, args):
     block_mols = []
     for b in range(args.num_nodes):
         carbons = carbon_block(b)
-        cset = set(carbons)
-        atoms = list(carbons) + [h for h in h_idx if h_to_c[h] in cset]
+        atoms = list(carbons) + [h for c in carbons for h in h_by_carbon.get(c, ())]
         els = [mol.elements[a] for a in atoms]
         co = coords[atoms].tolist()
         cap_left = None
@@ -340,8 +347,7 @@ def _build_fragments(mol: Molecule, n_c: int, args):
     if getattr(args, "mbe_order", 2) >= 2:
         for k in range(args.num_nodes - 1):
             carbons = cs[edges[k] : edges[k + 2]]
-            cset = set(carbons)
-            atoms = list(carbons) + [h for h in h_idx if h_to_c[h] in cset]
+            atoms = list(carbons) + [h for c in carbons for h in h_by_carbon.get(c, ())]
             els = [mol.elements[a] for a in atoms]
             co = coords[atoms].tolist()
             m = Molecule(list(els), np.array(co, dtype=float), label=f"dimer_{k:04d}")
@@ -785,8 +791,10 @@ def _write_launch_artifacts(out: Path, schedule, args):
             _render_block_runner(slots, args, ntpoly_slice_num=dimer_slice),
             0o755,
         )
-    # Unfragmented baseline: launch on one node like a block (ntpoly).
-    _write(out / "full" / "run_local.sh", _render_block_runner(slots, args), 0o755)
+    # Unfragmented baseline: launch on one node like a block (ntpoly). Only when
+    # the full baseline was generated (--no-full-baseline skips the full/ dir).
+    if getattr(args, "full_baseline", True):
+        _write(out / "full" / "run_local.sh", _render_block_runner(slots, args), 0o755)
 
 
 def main():
