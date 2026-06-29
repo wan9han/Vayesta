@@ -40,9 +40,13 @@
 ## 复现
 
 ```bash
-python3 bench_combine.py          # 收集 benchmark（全规模，秒级）
-python3 bench_gen.py              # 展开 benchmark（1/2/4/8/16，秒级）
-python3 bench_gen.py 22680        # 22680 节点（~28 min，81 GB 内存）
+# 收集 benchmark（全规模含 22680，秒级，无外部依赖）
+python3 bench_combine.py
+# 展开 benchmark（1/2/4/8/16，秒级）。gen-script/pseudo-dir 必填；
+# --pythonpath 仅当系统 python3 缺 numpy/scipy 时才需要
+python3 bench_gen.py --gen-script <gen.py> --pseudo-dir <pseudos> [--pythonpath <venv>]
+# 22680 节点（~28 min，81 GB 内存，37 GB 输出）
+python3 bench_gen.py --gen-script <gen.py> --pseudo-dir <pseudos> --nodes 22680
 ```
 
 > 注：`gen_*`、`combine_*` 为测试输出（22680 的 gen 目录 ~37 GB），已 gitignore。
