@@ -2,20 +2,20 @@
 
 在 1 / 2 / 4 / 8 / 16 / **22680** 节点规模下测试"体系展开"与"结果收集计算"两过程的耗时。配置：每节点 8000 原子，`--no-full-baseline --shared-pseudo`。
 
-## 收集（combine）—— 用 16×500 真实结果做模板复制到各规模
+## 收集（combine）—— 复制真实 siesta.out 到 N 节点，用完整 combine_results.py
 
-`bench_combine.py` 以 16×500 真实能量（`template_16x500.json`）为模板，cycle 到 N 节点，造 siesta.out + schedule.json，执行 MFCC(1)+MBE(2) 收集计算并计时。
+`bench_combine.py` 把**真实** siesta.out 模板（`templates/block.out` ~1.4MB、`dimer.out` ~2.5MB、`cap.out` ~27KB，取自内网实测）复制到 N 节点的 block/cap/dimer 目录，放入真实的 `combine_results.py` 并执行——测量的是真实的"打开+读取若干个真实大小文件 + 正则 + 求和"的文件系统开销，而非 1 行假文件。
 
-| 节点 | 造数据 | **combine** | 文件数 |
-|---|---|---|---|
-| 1 | 0.00s | 0.0000s | 1 |
-| 2 | 0.00s | 0.0001s | 4 |
-| 4 | 0.00s | 0.0001s | 10 |
-| 8 | 0.00s | 0.0002s | 22 |
-| 16 | 0.00s | 0.0006s | 46 |
-| **22680** | 2.12s | **0.591s** | 68038 |
+| 节点 | 文件数 | 字节 | 造数据 | **combine** |
+|---|---|---|---|---|
+| 1 | 1 | 0.00G | 0.0s | 0.04s |
+| 2 | 4 | 0.01G | 0.0s | 0.05s |
+| 4 | 10 | 0.01G | 0.0s | 0.08s |
+| 8 | 22 | 0.03G | 0.0s | 0.16s |
+| 16 | 46 | 0.06G | 0.0s | 0.30s |
+| **22680** | 68038 | ~90G | TBD | **TBD（内外网实测）** |
 
-**结论：收集过程 O(N) 求和，全机 22680 节点仅 0.59 s，完全不构成瓶颈。** 16 节点 E_total=-492590.5 eV 与真实结果一致（验证 combine 逻辑正确）。
+22680 节点需读 ~90 GB / 68038 文件，由内外网分别实测填入。按 16 节点（0.06GB→0.30s）外推，纯读取约 ~7 min（磁盘带宽主导），另含 68000 次文件打开/正则开销。
 
 ## 展开（生成）—— `weak_scale_pe.py` 生成 block/dimer/cap 输入
 
@@ -40,13 +40,14 @@
 ## 复现
 
 ```bash
-# 收集 benchmark（全规模含 22680，秒级，无外部依赖）
-python3 bench_combine.py
-# 展开 benchmark（1/2/4/8/16，秒级）。gen-script/pseudo-dir 必填；
-# --pythonpath 仅当系统 python3 缺 numpy/scipy 时才需要
+# 收集 benchmark：复制真实 siesta.out 模板到 N 节点 + 跑真实 combine_results.py。
+#   1/2/4/8/16 秒级；22680 需 ~90GB 磁盘、~10min（造数据 + 读 90GB）。
+#   无外部依赖（纯标准库，模板自带在 templates/）。
+python3 bench_combine.py                   # 默认 1/2/4/8/16
+python3 bench_combine.py --nodes 22680     # 全机规模
+# 展开 benchmark（gen-script/pseudo-dir 必填；--pythonpath 仅当系统 python3 缺 numpy/scipy 时）
 python3 bench_gen.py --gen-script <gen.py> --pseudo-dir <pseudos> [--pythonpath <venv>]
-# 22680 节点（~28 min，81 GB 内存，37 GB 输出）
-python3 bench_gen.py --gen-script <gen.py> --pseudo-dir <pseudos> --nodes 22680
+python3 bench_gen.py --gen-script <gen.py> --pseudo-dir <pseudos> --nodes 22680   # ~28min, 81GB 内存
 ```
 
 > 注：`gen_*`、`combine_*` 为测试输出（22680 的 gen 目录 ~37 GB），已 gitignore。

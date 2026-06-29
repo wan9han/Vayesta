@@ -1,54 +1,80 @@
 #!/usr/bin/env python3
-"""收集(combine)性能 benchmark：用 16×500 真实结果做模板，复制到 N 节点规模，
-执行 MFCC(1)+MBE(2) 收集计算并计时。规模: 1/2/4/8/16/22680。"""
-import json, time, re, os, sys
+"""Combine (收集) benchmark -- real filesystem impact, portable.
+
+Replicates REAL siesta.out templates (block ~1.4MB / dimer ~2.5MB / cap ~27KB,
+captured from an actual intranet run under templates/) to N nodes, drops in the
+real combine_results.py, and runs it. This measures the true cost of collecting
+N nodes' outputs: opening/reading ~68000 real-size files + regex + sum, i.e. the
+filesystem load at full scale -- NOT a toy with 1-line stubs.
+
+No hardcoded paths. Usage:
+  python3 bench_combine.py                   # 1/2/4/8/16 (seconds)
+  python3 bench_combine.py --nodes 22680     # full scale (~90GB, ~10min)
+"""
+import argparse
+import json
+import re
+import shutil
+import subprocess
+import time
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent
-tmpl = json.loads((ROOT / "template_16x500.json").read_text())
-TB, TC, TD = tmpl["blocks"], tmpl["caps"], tmpl["dimers"]
-TOTAL_RE = re.compile(r"siesta:.*Total\s*=\s*(-?\d+\.\d+)")
-SCALES = [1, 2, 4, 8, 16, 22680]
+TPL = ROOT / "templates"
+
 
 def fabricate(n, out):
-    """造 N 节点的 siesta.out（cycle 模板能量）+ schedule.json。"""
-    if out.exists():
-        return  # 复用（不重复造）
-    out.mkdir(parents=True)
+    """Copy real templates into N-node layout + schedule.json. Returns (files, bytes)."""
+    out.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(TPL / "combine_results.py", out / "combine_results.py")
     nc = n - 1
-    sched = {"num_nodes": n, "dimers": [{"dimer_id": i} for i in range(nc)]}
-    (out / "schedule.json").write_text(json.dumps(sched))
+    (out / "schedule.json").write_text(
+        json.dumps({"num_nodes": n, "dimers": [{"dimer_id": i} for i in range(nc)]})
+    )
+    bsz = (TPL / "block.out").stat().st_size
+    dsz = (TPL / "dimer.out").stat().st_size
+    csz = (TPL / "cap.out").stat().st_size
+    nfiles = nbytes = 0
     for i in range(n):
-        d = out / f"block_{i:04d}"; d.mkdir(exist_ok=True)
-        (d / "siesta.out").write_text(f"siesta:         Total =     {TB[i % len(TB)]:.6f}\n")
+        d = out / f"block_{i:04d}"
+        d.mkdir(exist_ok=True)
+        shutil.copyfile(TPL / "block.out", d / "siesta.out")
+        nfiles += 1; nbytes += bsz
     for i in range(nc):
-        for kind, pool in (("cap", TC), ("dimer", TD)):
-            d = out / f"{kind}_{i:04d}"; d.mkdir(exist_ok=True)
-            (d / "siesta.out").write_text(f"siesta:         Total =     {pool[i % len(pool)]:.6f}\n")
+        d = out / f"cap_{i:04d}"
+        d.mkdir(exist_ok=True)
+        shutil.copyfile(TPL / "cap.out", d / "siesta.out")
+        nfiles += 1; nbytes += csz
+        d = out / f"dimer_{i:04d}"
+        d.mkdir(exist_ok=True)
+        shutil.copyfile(TPL / "dimer.out", d / "siesta.out")
+        nfiles += 1; nbytes += dsz
+    return nfiles, nbytes
 
-def combine(out):
-    """复刻 combine_results.py 的收集逻辑，返回 (e_mbe2, 耗时)。"""
-    root = out
-    sched = json.loads((root / "schedule.json").read_text())
-    n = sched["num_nodes"]; nc = n - 1; nd = len(sched.get("dimers", []))
-    t0 = time.perf_counter()
-    be = []
-    for i in range(n):
-        m = TOTAL_RE.findall((root / f"block_{i:04d}" / "siesta.out").read_text())
-        be.append(float(m[-1]))
-    ce = [float(TOTAL_RE.findall((root / f"cap_{i:04d}" / "siesta.out").read_text())[-1]) for i in range(nc)]
-    de = [float(TOTAL_RE.findall((root / f"dimer_{i:04d}" / "siesta.out").read_text())[-1]) for i in range(nd)] if nd == nc else []
-    e_mfcc = sum(be) - sum(ce)
-    e_mbe2 = e_mfcc
-    if nd == nc:
-        for k in range(nd):
-            e_mbe2 += de[k] - be[k] - be[k + 1] + ce[k]
-    return e_mbe2, time.perf_counter() - t0
 
-print(f"{'nodes':>6} | {'fabricate':>10} | {'combine(s)':>10} | {'files':>7} | E_total(eV)")
-print("-" * 65)
-for n in SCALES:
-    out = ROOT / f"combine_{n}"
-    t0 = time.perf_counter(); fabricate(n, out); tf = time.perf_counter() - t0
-    e, tc = combine(out)
-    nf = n + 2 * (n - 1)
-    print(f"{n:>6} | {tf:>9.2f}s | {tc:>10.4f} | {nf:>7} | {e:,.1f}")
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--nodes", type=int, nargs="+", default=[1, 2, 4, 8, 16])
+    args = ap.parse_args()
+
+    print(f"{'nodes':>6} | {'files':>7} | {'bytes':>9} | {'fabricate':>9} | {'combine':>9}")
+    print("-" * 62)
+    for n in args.nodes:
+        out = ROOT / f"combine_{n}"
+        if out.exists():
+            shutil.rmtree(out)
+        t0 = time.perf_counter()
+        nf, nb = fabricate(n, out)
+        tf = time.perf_counter() - t0
+        t1 = time.perf_counter()
+        r = subprocess.run(["python3", "combine_results.py"],
+                           capture_output=True, text=True, cwd=str(out))
+        tc = time.perf_counter() - t1
+        ct = re.search(r"\[combine-time\] (.*)", r.stdout)
+        print(f"{n:>6} | {nf:>7} | {nb / 1e9:>8.2f}G | {tf:>8.1f}s | {tc:>8.2f}s"
+              + (f"   [{ct.group(1).strip()}]" if ct else ""))
+
+
+if __name__ == "__main__":
+    main()
