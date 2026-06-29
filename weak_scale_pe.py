@@ -104,7 +104,18 @@ def _parse_args():
     ap.add_argument(
         "--gen-script",
         default=str(DEFAULT_GEN_SCRIPT),
-        help="path to PE generator script (default: repo-local gen.py)",
+        help="path to PE generator script (used only with --no-in-process)",
+    )
+    ap.add_argument(
+        "--in-process",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Generate the PE chain in-process via the vectorized numpy generator "
+            "(default on): ~1000x faster, no gen.py subprocess, no 12.7GB FDF "
+            "serialize/parse round-trip. --no-in-process falls back to the "
+            "gen.py subprocess + FDF parse path (requires --gen-script)."
+        ),
     )
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--pseudo-dir", required=True)
@@ -231,43 +242,52 @@ def _parse_args():
 def _generate_chain(args):
     target = args.atoms_per_node * args.num_nodes
     n_c = max(round((target - 2) / 3.0), args.num_nodes * 2)
-    proc = subprocess.run(
-        [args.python, args.gen_script, str(n_c)],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    mol = parse_gen_fdf_text(proc.stdout, label=f"PE_{n_c}C")
+    label = f"PE_{n_c}C"
+    if getattr(args, "in_process_gen", True):
+        # Vectorized, in-process: builds the PE chain directly as numpy arrays,
+        # skipping the gen.py subprocess and the 12.7 GB FDF serialize/parse
+        # round-trip (~1000x faster at full scale). Geometry-identical to gen.py.
+        from energy_first.pe_chain import generate_pe_chain
+        elements, coords = generate_pe_chain(n_c)
+        mol = Molecule(list(elements), coords, label)
+    else:
+        proc = subprocess.run(
+            [args.python, args.gen_script, str(n_c)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        mol = parse_gen_fdf_text(proc.stdout, label=label)
     return mol, n_c
 
 
 def _build_fragments(mol: Molecule, n_c: int, args):
     coords = mol.coords
-    cs = [i for i, e in enumerate(mol.elements) if e == "C"]
-    cs.sort(key=lambda i: (coords[i, 0], coords[i, 1], coords[i, 2]))
-    cpos = coords[cs]
-    h_idx = [i for i, e in enumerate(mol.elements) if e == "H"]
-    # Map each H to its nearest C. The original brute-force was O(n_H * n_C) = O(N^2)
-    # (a Python loop, one all-carbon norm per H), which dominates system generation
-    # and becomes infeasible at E-scale. cKDTree gives the SAME nearest-carbon result
-    # (query k=1 == argmin over Euclidean norm; C-H bonds are unique, no ties) in
-    # O(N log N). See 生成优化文档.md.
-    h_to_c = {}
-    if h_idx:
+    el_arr = np.asarray(mol.elements)
+    # carbon indices, sorted by (x,y,z) — vectorized (np.where + lexsort)
+    cs_arr = np.where(el_arr == "C")[0]
+    cs_arr = cs_arr[np.lexsort((coords[cs_arr, 2], coords[cs_arr, 1], coords[cs_arr, 0]))]
+    cs = cs_arr.tolist()
+    cpos = coords[cs_arr]
+    h_idx = np.where(el_arr == "H")[0]
+
+    # Map each H to its nearest C via cKDTree (O(N log N), same result as the
+    # old brute-force argmin), then group H by carbon via numpy argsort (no
+    # Python loop over N_H). Both the h_to_c dict-build and the h_by_carbon
+    # defaultdict loop were O(N) Python loops over 100M+ H — now vectorized.
+    h_by_carbon = {}
+    if len(h_idx) > 0:
         from scipy.spatial import cKDTree
         tree = cKDTree(cpos)
         _, nn = tree.query(coords[h_idx], k=1)
         nn = np.atleast_1d(nn)
-        for h, j in zip(h_idx, nn):
-            h_to_c[h] = cs[int(j)]
-
-    # Invert h_to_c once (O(N)): carbon -> list of its H. Lets each block/dimer
-    # gather its H in O(#carbons-in-segment) instead of scanning all H per
-    # segment (which was O(num_segments * n_H) = O(N^2) and dominated at scale).
-    from collections import defaultdict
-    h_by_carbon = defaultdict(list)
-    for h in h_idx:
-        h_by_carbon[h_to_c[h]].append(h)
+        hc = cs_arr[nn]                       # carbon atom-index per H
+        order = np.argsort(hc, kind="stable")  # group H by carbon
+        hc_s = hc[order]
+        h_s = h_idx[order]
+        uniq, starts = np.unique(hc_s, return_index=True)
+        groups = np.split(h_s, starts[1:]) if len(starts) > 1 else [h_s]
+        h_by_carbon = dict(zip(uniq.tolist(), [g.tolist() for g in groups]))
 
     edges = [round(k * len(cs) / args.num_nodes) for k in range(args.num_nodes + 1)]
 
@@ -803,9 +823,9 @@ def main():
         raise SystemExit(
             f"num-nodes={args.num_nodes} > available hosts {len(args.hosts)}"
         )
-    if not Path(args.gen_script).exists():
+    if not getattr(args, "in_process_gen", True) and not Path(args.gen_script).exists():
         raise SystemExit(
-            f"gen script not found: {args.gen_script}"
+            f"gen script not found: {args.gen_script} (required for --no-in-process)"
         )
     for name in ("block_slice_num", "dimer_slice_num"):
         if getattr(args, name) < 1:
