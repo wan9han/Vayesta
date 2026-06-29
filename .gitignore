@@ -8,3 +8,7 @@ MESSAGES
 INPUT_TMP.*
 *.alloc
 fdf.*.log
+
+# benchmark 测试输出（gen_22680 ~37GB）
+benchmark/gen_*/
+benchmark/combine_*/
