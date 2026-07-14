@@ -58,6 +58,10 @@ def _parse_args():
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--basis", default="SZ")
     ap.add_argument("--mesh-cutoff-ry", type=float, default=100.0)
+    ap.add_argument("--block-slice-num", type=int, default=1,
+                    help="NTPOLY_SLICE_NUM for blocks (default 1)")
+    ap.add_argument("--dimer-slice-num", type=int, default=2,
+                    help="NTPOLY_SLICE_NUM for dimers (default 2)")
     ap.add_argument(
         "--shared-pseudo",
         action=argparse.BooleanOptionalAction,
