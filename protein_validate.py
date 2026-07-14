@@ -103,8 +103,9 @@ def main(argv=None):
     ap.add_argument("--n-residues", type=int, default=6)
     ap.add_argument("--cuts", type=int, nargs="+", default=[1, 2])
     ap.add_argument("--work-root", default="/tmp/protein-validate")
-    ap.add_argument("--siesta-bin", required=True,
-                    help="path to siesta executable")
+    ap.add_argument("--siesta-bin",
+                    default="/share/honpas/xzz/siesta-20260520/siesta/build-clang/Src/siesta",
+                    help="path to siesta executable (same default as weak_scale_pe.py)")
     ap.add_argument("--pseudo-dir",
                     default=str(_REPO / "pseudos"),
                     help="dir with C/H/N/O .psf (default: repo pseudos/)")
