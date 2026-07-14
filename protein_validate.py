@@ -16,8 +16,7 @@ from energy_first.peptide_chain import generate_polyglycine
 from energy_first.molecule import Molecule
 from energy_first.siesta_backend import run_siesta
 
-SIESTA = "/home/xzz2/huawei-siesta/siesta-install/bin/siesta"
-PSEUDO = "/home/xzz2/huawei-siesta/testcases"
+_REPO = Path(__file__).resolve().parent
 
 
 def _dist(a, b):
@@ -104,6 +103,11 @@ def main(argv=None):
     ap.add_argument("--n-residues", type=int, default=6)
     ap.add_argument("--cuts", type=int, nargs="+", default=[1, 2])
     ap.add_argument("--work-root", default="/tmp/protein-validate")
+    ap.add_argument("--siesta-bin", required=True,
+                    help="path to siesta executable")
+    ap.add_argument("--pseudo-dir",
+                    default=str(_REPO / "pseudos"),
+                    help="dir with C/H/N/O .psf (default: repo pseudos/)")
     args = ap.parse_args(argv)
 
     root = Path(args.work_root); root.mkdir(parents=True, exist_ok=True)
@@ -112,7 +116,7 @@ def main(argv=None):
         key = hashlib.sha256((label + str(np.round(mol.coords, 8).tobytes())).encode()).hexdigest()
         if key in cache: return cache[key]
         m = Molecule(list(mol.elements), mol.coords.copy(), label)
-        r = run_siesta(m, root / label, siesta_bin=SIESTA, pseudo_dir=PSEUDO,
+        r = run_siesta(m, root / label, siesta_bin=args.siesta_bin, pseudo_dir=args.pseudo_dir,
                        label=label, basis_size="SZ", solution_method="diagonali", timeout=300)
         e = r["energy_ev"]
         if e is None: print(f"  ⚠ {label}: FAIL rc={r['returncode']}")

@@ -77,16 +77,16 @@ git checkout protein
 # 单节点跑聚甘氨酸 MFCC+MBE(2) 验证
 # 6 个甘氨酸残基（44 原子），切 1 个和 2 个肽键
 # 约 12 个 SIESTA 小作业（每个 < 1 分钟）
-python3 protein_validate.py \
+python3 protein_validate.py --siesta-bin $SIESTA_BIN \
   --n-residues 6 \
   --cuts 1 2 \
-  --work-root $OUT_BASE/protein_gly6
+  --work-root $OUT_BASE/protein_gly6 --pseudo-dir pseudos
 
 # 更大体系（可选）：12 残基，切 2/3/4 个肽键
-python3 protein_validate.py \
+python3 protein_validate.py --siesta-bin $SIESTA_BIN \
   --n-residues 12 \
   --cuts 2 3 4 \
-  --work-root $OUT_BASE/protein_gly12
+  --work-root $OUT_BASE/protein_gly12 --pseudo-dir pseudos
 ```
 
 ### 预期结果
