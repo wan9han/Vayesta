@@ -118,7 +118,11 @@ def _parse_args():
         ),
     )
     ap.add_argument("--python", default=sys.executable)
-    ap.add_argument("--pseudo-dir", required=True)
+    ap.add_argument(
+        "--pseudo-dir",
+        default=str(Path(__file__).resolve().parent / "pseudos"),
+        help="dir containing *.psf pseudopotentials (default: repo-local pseudos/)",
+    )
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--basis", default="SZ")
     ap.add_argument("--mesh-cutoff-ry", type=float, default=100.0)
