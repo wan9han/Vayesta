@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 # Element -> atomic number (extend if polyethylene grows beyond C/H).
-_ATOMIC_NUMBER: Dict[str, int] = {"H": 1, "C": 6}
+_ATOMIC_NUMBER: Dict[str, int] = {"H": 1, "C": 6, "N": 7, "O": 8}
 
 
 @dataclass
