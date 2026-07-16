@@ -40,8 +40,9 @@ def gen_scale(out_dir, gpn, n_nodes, hosts, remote_base, extra):
 
 
 def exec_submit(out_dir):
-    sub = out_dir / "submit_per_node_local.sh"
-    if not sub.exists():
+    sub = (out_dir / "submit_per_node_local.sh").resolve()       # ABSOLUTE: avoids the
+    out_dir = out_dir.resolve()                                  # relative-path doubling bug
+    if not sub.exists():                                         # (bash <rel> + cwd=dir -> dir/dir/...)
         print(f"[ERROR] submit_per_node_local.sh NOT FOUND in {out_dir}", flush=True)
         print(f"  contents of {out_dir}:", flush=True)
         import os
