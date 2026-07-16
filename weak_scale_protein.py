@@ -76,8 +76,20 @@ def _parse_args():
     )
     ap.add_argument(
         "--solution-method",
-        default="ntpoly",
+        default="diagonali",
         choices=["ntpoly", "diagonali"],
+        help="SIESTA solver for blocks/dimers/full (default diagonali). "
+             "Polyglycine's ~0.1 eV amide band gap at scale defeats NTPoly/TRS2 "
+             "purification (never converges >~100 residues); diagonali resolves "
+             "the gap exactly and converges, so it is the default. Use ntpoly "
+             "only for small fragments where TRS2 is wanted (needs "
+             "SCF.H.Converge .false. in molecule.py).",
+    )
+    ap.add_argument(
+        "--full-solution-method",
+        default="diagonali",
+        choices=["ntpoly", "diagonali"],
+        help="Solver for the unfragmented full-chain baseline (default diagonali).",
     )
     ap.add_argument("--hosts", nargs="+", default=DEFAULT_HOSTS)
     ap.add_argument("--num-numa", type=int, default=16)
@@ -109,12 +121,15 @@ def _build_fragments(mol, n_residues, args):
     if num_nodes == 1:
         cuts = []
     else:
-        # Evenly-spaced peptide bonds (same approach as PE's pick_cuts)
-        n_bonds = len(bonds)
+        # Cut only INTERNAL glycine-glycine peptide bonds. find_peptide_bonds also
+        # returns the two ACE-N0 / C'n-NME cap bonds (ends of the list); cutting
+        # those would detach the cap groups. Exclude them.
+        internal = bonds[1:-1] if len(bonds) > 2 else bonds
+        n_bonds = len(internal)
         cuts = []
         for k in range(1, num_nodes):
             idx = min(round(k * n_bonds / num_nodes), n_bonds - 1)
-            cuts.append(bonds[idx])
+            cuts.append(internal[idx])
 
     frag_mols, cap_mols, comp = fragment(mol, cuts)
     dimer_mols = []

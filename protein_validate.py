@@ -143,6 +143,10 @@ def main(argv=None):
     ap.add_argument("--pseudo-dir",
                     default=str(_REPO / "pseudos"),
                     help="dir with C/H/N/O .psf (default: repo pseudos/)")
+    ap.add_argument("--solution-method", default="diagonali", choices=["ntpoly", "diagonali"],
+                    help="SIESTA solver (default diagonali -- polyglycine's small amide gap "
+                         "defeats NTPoly/TRS2 at scale; diagonali converges). Caps always diagonali.")
+    ap.add_argument("--timeout", type=int, default=600)
     args = ap.parse_args(argv)
 
     root = Path(args.work_root)
@@ -154,8 +158,11 @@ def main(argv=None):
         if key in cache:
             return cache[key]
         m = Molecule(list(mol.elements), mol.coords.copy(), label)
+        # Caps are 2-orbital H2: always diagonali (fast, and avoids sparse-solver
+        # overhead on a trivial system). Everything else uses the chosen solver.
+        solver = "diagonali" if label.startswith("c") else args.solution_method
         r = run_siesta(m, root / label, siesta_bin=args.siesta_bin, pseudo_dir=args.pseudo_dir,
-                       label=label, basis_size="SZ", solution_method="diagonali", timeout=300)
+                       label=label, basis_size="SZ", solution_method=solver, timeout=args.timeout)
         e = r["energy_ev"]
         if e is None:
             print(f"  ⚠ {label}: FAIL rc={r['returncode']}")

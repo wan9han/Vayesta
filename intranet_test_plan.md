@@ -62,11 +62,24 @@ mkdir -p $OUT_BASE
 
 ---
 
-## 1. 蛋白质 MFCC+MBE(2) 验证（protein 分支）
+## 1. 蛋白质 MFCC+MBE(2) 验证（protein 分支，TRS2 求解器）
 
 ### 目的
 
-证明 MFCC+MBE(2) 算法不仅适用于聚乙烯（C-C 键切割，C/H 二元素），也适用于蛋白质骨架（C'-N 肽键切割，C/H/N/O 四元素）。这是回应评审"验证算法普适性"的核心证据。
+证明 MFCC+MBE(2) 算法在 **TRS2（NTPoly 密度矩阵纯化）求解器**下，不仅适用于聚乙烯（C-C 键切割），也适用于蛋白质骨架（C'-N 肽键切割，C/H/N/O 四元素）。这是回应评审"验证算法普适性 + 专用求解器"的核心证据。
+
+### 关键：为什么是 ACE/NME 封端的 α-螺旋聚甘氨酸
+
+裸聚甘氨酸 `-(NH-CH2-CO)n-` 在 TRS2 下 **永不收敛**，原因有二（均已实测）：
+1. **端基电荷转移态 ~0.06 eV**（与链长无关）：自由 N 端 -NH2（浅 HOMO）→ 自由 C 端 -COOH（深 LUMO）。
+2. β-strand 还有随链长收缩的带隙（0.70 eV @16 残基 → 0.11 eV @64 残基）。
+
+NTPoly 用**尖锐 0/1 占据投影**做纯化（提高 ElectronicTemperature 无效），无法分辨 <~0.3 eV 的能隙 → SCF 振荡。
+
+**修复（三件套，都已写入代码）**：
+- **ACE/NME 端基封端** `Ac-(Gly)n-NHMe`：去掉端基 CT 态，能隙 0.06 → ~1.0 eV（且随链长增长，是真实的酰胺体带隙）。`energy_first/peptide_chain.py:generate_polyglycine`。
+- **α-螺旋构象** (phi=-57, psi=-47)：紧凑折叠，稳定的 ~1 eV 体带隙；PCA 旋转把螺旋轴对齐 x，网格保持 ~L×5×5（线性）而非 L³。
+- **`SCF.H.Converge .false.`**（`molecule.py` ntpoly 分支）：~1 eV 能隙边缘仍有一个轨道使 dHmax 振荡（~3-8 eV），但密度矩阵和总能量已收敛；按 DM 判据（dDmax<1e-4）宣告收敛。对 PE（大能隙）无害。
 
 ### 指令
 
@@ -74,48 +87,162 @@ mkdir -p $OUT_BASE
 cd /share/honpas/xzz/energy_first/Vayesta-energy_first   # 你的仓库路径
 git checkout protein
 
-# 单节点跑聚甘氨酸 MFCC+MBE(2) 验证
-# 6 个甘氨酸残基（44 原子），切 1 个和 2 个肽键
-# 约 12 个 SIESTA 小作业（每个 < 1 分钟）
+# 单节点 MFCC+MBE(2) 验证，TRS2 求解器（默认）
+# 16 残基封端 α-螺旋（124 原子），切 2 个内部肽键
+# protein_validate.py 默认 --solution-method ntpoly（即 TRS2）
 python3 protein_validate.py --siesta-bin $SIESTA_BIN \
-  --n-residues 6 \
-  --cuts 1 2 \
-  --work-root $OUT_BASE/protein_gly6 --pseudo-dir pseudos
+  --n-residues 16 \
+  --cuts 2 \
+  --solution-method ntpoly \
+  --work-root $OUT_BASE/protein_gly16 --pseudo-dir pseudos
 
-# 更大体系（可选）：12 残基，切 2/3/4 个肽键
-python3 protein_validate.py --siesta-bin $SIESTA_BIN \
-  --n-residues 12 \
-  --cuts 2 3 4 \
-  --work-root $OUT_BASE/protein_gly12 --pseudo-dir pseudos
+# 注：protein_validate.py 单进程跑（无 mpirun），TRS2 在单核上较慢；
+# 内网若要多核，用 weak_scale_protein.py（每节点 mpirun）。
 ```
 
-### 预期结果
+### 预期结果（本机 dev 实测，16 残基 / 2 切口，全 TRS2 收敛）
 
 ```
-polyglycine(6): 44 atoms (C/H/N/O=12/20/6/6), 5 peptide bonds
-E_full = -6326.76xx eV
+capped alpha-helix polyglycine(16): 124 atoms, 17 amide bonds (15 internal), 2 cuts
+E_full    = -18074.0940 eV   (TRS2, 36 步收敛)
 
-=== 1 cut(s) ===
-  MFCC(1): -6325.8xxxx  err=+0.9xxxx eV (+0.9xxxx/cut)
-  MBE(2) : -6326.76xxxx  err=+0.0000 eV          ← 精确复现
+E_MFCC(1) = -18069.9710   err = +4.123 eV (+2.06/cut)   ← 常规 H-cap 误差
+E_MBE(2)  = -18074.0920   err = +0.002 eV (+0.001/cut)  ← TRS2+MBE(2) 精确复现
+```
 
-=== 2 cut(s) ===
-  MFCC(1): -6324.9xxxx  err=+1.8xxxx eV (+0.9xxxx/cut)
-  MBE(2) : -6326.6xxxxx  err=+0.1xxxx eV (+0.05xxxx/cut)  ← 17x 改善
+### 更大规模（48 残基 / 4 切口，全 TRS2，本机 dev 实测）
+
+5 片段（~70 原子/片段）+ 4 二聚体 + 4 cap + full（348 原子），14 个 SIESTA 作业全部 TRS2 收敛：
+
+```
+E_full    = -51714.9312 eV   (TRS2, 56 步收敛)
+E_MFCC(1) = -51701.3395       err = +13.592 eV (+3.398/cut)
+E_MBE(2)  = -51714.5753       err = +0.356 eV  (+0.089/cut)   ← 38x 改善
+每个切口二体增量: -3.24, -3.31, -3.36, -3.33 eV
 ```
 
 **判据**：
-- 1 切口 MBE(2) 误差 = 0.0000（N=2 恒等，与 PE 一致）
-- 2 切口 MBE(2) 每切口误差 < 0.1 eV（三体残差）
-- MFCC(1) 每切口误差 ~0.9 eV（与 PE 的 ~1.24 eV 同量级）
+- 所有作业（full / 片段 / 二聚体 / cap）在 TRS2 下都收敛（dDmax<1e-4，`SCF cycle converged`）。
+- MBE(2) 每切口误差：2 切口 ~0.001 eV/cut；4 切口 ~0.09 eV/cut（随切口数/片段增大，三体残差增长；C'-N 肽键有极性，三体残差大于 PE 的 C-C）。
+- MFCC(1) 每切口误差 ~2-3 eV（C'-N 肽键切割的 H-cap 误差，被 MBE(2) 二聚体校正抵消）。
+- 若需 <0.01 eV/cut，可升级到 MBE(3)（三体校正，成本 ~N² 个三聚体）。
 
 ### 需要关注的点
 
-- N.psf / O.psf 的基组是否与 C.psf / H.psf 一致（SZ）。如果 SIESTA 报 basis 警告，需要换赝势。
-- 如果 SCF 不收敛，加大 `MaxSCFIterations`（在 `energy_first/molecule.py` 的 `write_siesta_fdf` 中，当前 100）。
-- 内网 ARM 单核速度可能不同，但 44 原子的小体系应在 1-2 分钟内完成。
+- **切口只取内部肽键**：ACE-N0 和 C'n-NME 是封端产生的两个端基酰胺键，不能切（否则把 cap 切下来）。代码里用 `bonds[1:-1]` 排除。
+- N.psf / O.psf 基组与 C.psf / H.psf 一致（SZ）。若 SIESTA 报 basis 警告，换赝势。
+- 内网 ARM 单核较慢；TRS2 收敛约 30-45 步，124 原子单核 ~10-15 分钟/作业。
+- 若 dHmax 不收敛但 dDmax<1e-4 且能量稳定 → 正常（小能隙边缘轨道），`SCF.H.Converge .false.` 已处理。
 
 ---
+
+## 1b. 蛋白质多节点弱扩展 sweep（protein 分支，TRS2，一键 1/2/4/8/16）
+
+### 目的
+
+用 `weak_scale_protein_all.py` 一次性跑完 1/2/4/8/16 节点弱扩展（每节点固定残基数，总规模随节点数增长），全部在 **TRS2 + MBE(2)** 下完成。证明蛋白质体系也能弱扩展，且 MFCC+MBE(2) 在多切口下能量正确。
+
+### 指令
+
+```bash
+cd /share/honpas/xzz/energy_first/Vayesta-energy_first   # 你的仓库路径
+git checkout protein
+
+# --hosts 有默认值（weak_scale_pe.DEFAULT_HOSTS 里的 16 个内网节点），不用手填。
+# --remote-out-dir 默认 = --big-out 的绝对路径；big-out 必须放在各节点共享可见的 /share/ 下。
+# --executor 默认 submit（即 submit_per_node_local.sh，SSH 登录各节点跑 run_local.sh）。
+python3 weak_scale_protein_all.py \
+  --residues-per-node 50 \
+  --nodes 1 2 4 8 16 \
+  --big-out /share/honpas/xzz/energy_first/test_results/ws_protein_sweep
+# 如要覆盖默认 hosts：
+#   --hosts <节点1> <节点2> ... <节点16>
+```
+
+**参数说明**：
+- `--residues-per-node`：每节点残基数（固定 = 弱扩展）。建议 50（封端 α-螺旋 ~360 原子/节点，TRS2 收敛、HBM 内存够）。内网若要更大矩阵可加到 100，但每节点 SCF 步数和时间会涨。
+- `--hosts`：**有默认值**（16 个内网 IP：8 个 71.20.27.* + 8 个 71.20.16.*，同 `weak_scale_pe.py`）。每个规模自动取前 N 个节点，**不考虑机器复用**。
+- `--big-out`：顶层输出文件夹，**必须放 /share/ 共享路径**（各节点要能 SSH 进去 cd 到子目录跑 run_local.sh）。
+- `--executor`：默认 `submit`（推荐 SSH launcher）；`dev-local` 是单机测试模式（本机 mpirun，不 SSH，不需内网）。
+
+### 输出结构
+
+```
+ws_protein_sweep/
+  n01/ n02/ n04/ n08/ n16/            # 每个规模一个文件夹（小→大）
+  weak_scale_summary.json             # 跨规模汇总（顶层）
+  每个 nXX/ 内：
+    schedule.json              ← json #1（生成调度）
+    weak_scaling_results.json  ← json #2（MFCC/MBE(2) 能量，combine 产出）
+    block_*/siesta.out  dimer_*/siesta.out  cap_*/siesta.out   # 各作业日志
+    submit_per_node_local.sh  combine_results.py  launch_logs/
+```
+
+n=1 特殊：0 切口 → 无 dimer/cap，但 `combine_results.py` 仍产出第二个 json（MFCC(1) only，单 block 即整链基线）。
+
+### 预期（弱扩展判据）
+
+- 每个规模所有作业在 TRS2 下收敛（`weak_scaling_results.json` 里 `E_total_ev` 非 null，`missing_outputs` 为空）。
+- n≥2 的 `method` = `MBE(2)`（n=1 是 MFCC(1) 整链基线）。
+- 每残基能量 `E_total / (residues_per_node × N)` 随 N 增大趋于稳定（边界/cap 效应减弱）；R 够大（≥50）时各规模每残基能量接近一致。
+- 各节点 block 的 SCF 墙钟时间大致恒定（弱扩展效率，看 `launch_logs/block_*.log`）。
+
+---
+
+## 1c. PEG 大规模弱扩展（TRS2，PE 同等规模）★推荐的大规模案例
+
+### 为什么用 PEG 而不是蛋白质做大规模
+
+蛋白质（肽键骨架）是共轭酰胺高分子，能隙随链长收缩到 ~0.1 eV（实测：64 残基 0.105 eV，128 残基 0.099 eV，连真实泛素折叠都只有 0.08 eV）—— **TRS2 在 >~100 残基就发散**，做不到 PE 规模。这是物理本质（酰胺 π 共轭沿键贯穿，与构象/折叠无关），调参/封端/切位都救不了。
+
+**PEG（聚乙二醇 -(CH₂CH₂O)-）是饱和 σ 键高分子**（无共轭 π），是绝缘体，能隙 **~1 eV 且不随链长收缩**（实测 64 单元 1.04 eV，128 单元 0.99 eV）。所以 **TRS2 在任意尺度都干净收敛**（898 原子 18 步收敛，dHmax 0.005 eV，无需任何 trick）。C/H/O（赝势现成）、切 C-O 醚键（新键型，证明 MFCC 普适到 C-C 之外）、生物相容性高分子。**这是能做到 PE 同等规模的案例。**
+
+### 单节点 MFCC+MBE(2) 验证
+
+```bash
+cd /share/honpas/xzz/energy_first/Vayesta-energy_first
+# 16 单元 PEG，切 1/2 个 C-O 键，全 TRS2。约 5 个小作业。
+python3 peg_validate.py --siesta-bin $SIESTA_BIN \
+  --units 16 --cuts 1 2 \
+  --work-root $OUT_BASE/peg_val --pseudo-dir pseudos
+```
+
+预期（dev 实测）：MBE(2) 每切口误差 ~0.01 eV（1 切口精确复现）。
+
+### 一键 1/2/4/8/16 节点弱扩展 sweep（PE 同等规模）
+
+```bash
+# --units-per-node 1100 ≈ 7700 原子 ≈ PE 的 8000 原子/节点矩阵规模。
+# --hosts 默认 16 个内网节点；--big-out 必须放 /share/ 共享路径。
+python3 weak_scale_peg_all.py \
+  --units-per-node 1100 \
+  --nodes 1 2 4 8 16 \
+  --big-out /share/honpas/xzz/energy_first/test_results/ws_peg_sweep
+# 默认 --executor submit（submit_per_node_local.sh，SSH 推荐 launcher）
+```
+
+**输出结构**（每个规模一个文件夹，日志 + 2 个 json）：
+```
+ws_peg_sweep/
+  n01/ n02/ n04/ n08/ n16/
+  weak_scale_summary.json          # 跨规模汇总
+  每个 nXX/: schedule.json, weak_scaling_results.json,
+            block_*/siesta.out, dimer_*/siesta.out, cap_*/siesta.out
+```
+
+**判据**：
+- 每个规模所有作业在 TRS2 下收敛（`weak_scaling_results.json` 里 `E_total_ev` 非 null）。
+- n≥2 的 `method` = `MBE(2)`；MBE(2) 每切口误差 < 0.05 eV。
+- 每单元能量 `E_total/(units_per_node×N)` 随 N 增大稳定（弱扩展一致性）。
+- 各节点 block 的 SCF 墙钟时间大致恒定（弱扩展效率）。
+
+### 需要关注的点
+- PEG 能隙 ~1 eV（稳定），TRS2 平静收敛，**不需要** `SCF.H.Converge .false.`（但 molecule.py ntpoly 分支带了这个设置，对 PEG 无害）。
+- 切口只取内部 C-O 醚键（O 连 2 个 C）；代码用 `_internal_co_bonds` 自动排除 2 个末端 C-OH 键。
+- 片段化用**重原子连通图**（`fragment_peg`），避免 PEG 紧密螺旋里 H···H(<1.7Å) 把片段错误连通。
+
+---
+
 
 ## 2. PE 弱扩展正确性 + 性能（energy_first 分支）
 

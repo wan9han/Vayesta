@@ -111,7 +111,11 @@ def write_siesta_fdf(
       * ``diagonali`` — standard LAPACK diagonalization (fast for small mol.)
       * ``ntpoly``    — ELSI/NTPoly TRS2 (method 2), the project's sparse
         solver for large blocks; uses the stable SCF settings from the
-        existing project (MaxSCF 150, Pulay 6, mixing 0.05).
+        existing project (MaxSCF 150, Pulay 6, mixing 0.05). NB: density-matrix
+        purification cannot resolve a small HOMO-LUMO gap; it oscillates
+        forever on near-metallic systems (e.g. polyglycine beta-strand, gap
+        ~0.1 eV). For such systems use ``diagonali`` — it resolves the gap
+        exactly and fits memory up to ~140 residues per fragment.
 
     Identical settings for full + fragments + caps keep comparisons bias-free.
     """
@@ -160,6 +164,15 @@ def write_siesta_fdf(
         lines.append("ELSI.NTPoly.Method 2")
         lines.append("ELSI.NTPoly.Filter 1.0e-9")
         lines.append("ELSI.NTPoly.Tolerance 1.0e-6")
+        # NTPoly builds a SHARP 0/1 occupation projector (ElectronicTemperature
+        # has no effect on it). For a small-gap system a borderline orbital sits
+        # at the Fermi level: the density matrix and total energy converge, but
+        # the Hamiltonian element of that orbital (dHmax) keeps flip-flopping,
+        # so the default "require H convergence" never reports convergence.
+        # Requiring only DM convergence (dDmax) gives a well-defined converged
+        # energy. Harmless for large-gap systems (PE), where dHmax converges
+        # together with dDmax anyway.
+        lines.append("SCF.H.Converge     .false.")
         eff_max_scf = max(max_scf, 150)
     else:
         lines.append("SolutionMethod   Diagonali")

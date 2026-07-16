@@ -461,7 +461,11 @@ def _write_inputs(out: Path, full_mol, block_mols, cap_mols, dimer_mols, args):
     # settings as the blocks so E_full is directly comparable. Skippable at
     # E-scale (SIESTA cannot run it anyway) via --no-full-baseline.
     if getattr(args, "full_baseline", True):
-        fdf_and_pseudos(full_mol, out / "full")
+        # The full baseline is the MFCC reference energy. It may use a different
+        # solver than the blocks (e.g. diagonali for a small-gap system where
+        # the sparse purification solver fails to converge the full chain).
+        full_solver = getattr(args, "full_solution_method", None) or solver
+        fdf_and_pseudos(full_mol, out / "full", force_solver=full_solver)
 
 
 def _render_env_script(args):
