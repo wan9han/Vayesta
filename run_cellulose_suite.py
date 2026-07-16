@@ -72,6 +72,7 @@ def run_scalability(args, work):
         print("[!!] stderr (last 3000 chars):", flush=True)
         print(p.stderr[-3000:], flush=True)
         print("[!!] Continuing to organize — scalability data may be incomplete.\n", flush=True)
+    return p.returncode
 
 
 def parse_energy(siout: Path):
@@ -207,11 +208,15 @@ def main():
         stdout_txt = run_correctness(args, corr_work)
     scal_work = raw / "scalability"
 
-    run_scalability(args, scal_work)
+    scal_rc = run_scalability(args, scal_work)
     organize(out, corr_work, scal_work, stdout_txt, args, skip_correctness=corr_done)
 
-    # clean raw (keep only the organized tree)
-    shutil.rmtree(raw, ignore_errors=True)
+    # clean raw (keep only the organized tree) -- but KEEP it if Phase 2 failed, so
+    # the user can inspect _raw/scalability/nXX/ (e.g. check submit_per_node_local.sh)
+    if scal_rc == 0:
+        shutil.rmtree(raw, ignore_errors=True)
+    else:
+        print(f"\n[!!] Phase 2 failed -> KEPT {raw} for inspection (rm -rf it manually when done)", flush=True)
     print(f"\n[DONE] organized results -> {out}")
     print(f"  correctness/unified + correctness/fragmented (+ result.json)")
     print(f"  scalability/n01..n{{:02d}} (+ schedule.json, weak_scaling_results.json each)".format(max(args.nodes)))
