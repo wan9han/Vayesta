@@ -77,13 +77,10 @@ def parse_energy(siout: Path):
 
 def organize(out: Path, corr_work: Path, scal_work: Path, stdout_txt: str, args):
     print("\n" + "#" * 70 + "\n# Phase 3: ORGANIZE\n" + "#" * 70, flush=True)
-    # ---- correctness/unified (full chain) ----
+    # ---- correctness/unified (full-chain LOG only; no heavy SIESTA outputs) ----
     uni = out / "correctness" / "unified"; uni.mkdir(parents=True, exist_ok=True)
-    src = corr_work / "full"
-    if src.exists():
-        for f in ("siesta.out", "input.fdf"):
-            if (src / f).exists():
-                shutil.copy2(src / f, uni / f)
+    if (corr_work / "full" / "siesta.out").exists():
+        shutil.copy2(corr_work / "full" / "siesta.out", uni / "siesta.out")
     e_full = parse_energy(uni / "siesta.out")
 
     # ---- correctness/fragmented (MFCC pieces) ----
@@ -115,12 +112,20 @@ def organize(out: Path, corr_work: Path, scal_work: Path, stdout_txt: str, args)
                 cur["mbe2_err_per_cut_ev"] = float(mm.group(3))
     (out / "correctness" / "fragmented" / "result.json").write_text(json.dumps(result, indent=2) + "\n")
 
-    # ---- scalability (already nXX/-structured by the sweep) ----
-    scal_dst = out / "scalability"
+    # ---- scalability (LOGS + jsons only: no .ion/.BONDS/.XV/_pseudos/etc.) ----
+    scal_dst = out / "scalability"; scal_dst.mkdir(parents=True, exist_ok=True)
     if scal_work.exists():
-        if scal_dst.exists():
-            shutil.rmtree(scal_dst)
-        shutil.copytree(scal_work, scal_dst)        # n01/.., weak_scale_summary.json
+        for item in sorted(scal_work.iterdir()):
+            if item.name == "weak_scale_summary.json":
+                shutil.copy2(item, scal_dst / item.name)
+            elif item.is_dir():                     # nXX/
+                nd = scal_dst / item.name; nd.mkdir(exist_ok=True)
+                for j in ("schedule.json", "weak_scaling_results.json"):
+                    if (item / j).exists():
+                        shutil.copy2(item / j, nd / j)
+                for jd in sorted(item.iterdir()):   # block_*/dimer_*/cap_*/full
+                    if jd.is_dir() and (jd / "siesta.out").exists():
+                        shutil.copy2(jd / "siesta.out", nd / f"{jd.name}.siesta.out")
 
     # ---- summary.txt ----
     write_summary(out, result, scal_dst)
