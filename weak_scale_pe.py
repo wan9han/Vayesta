@@ -637,7 +637,7 @@ for ((i=0;i<{args.num_nodes};i++)); do
   ssh "{ssh_user}$h" "cd '$REMOTE_OUT_DIR/$blk' && bash ./run_local.sh" \
     > "$LOG_DIR/$blk.$h.log" 2>&1 &
 done
-wait
+wait || true   # a failed block must not abort the sweep -- combine still runs (partial)
 
 # MBE(2) joined dimers: one per cut, run after the blocks free the nodes.
 NUM_CUTS=$(( {args.num_nodes} - 1 ))
@@ -647,12 +647,12 @@ for ((k=0;k<NUM_CUTS;k++)); do
   ssh "{ssh_user}$h" "cd '$REMOTE_OUT_DIR/$dmr' && bash ./run_local.sh" \
     > "$LOG_DIR/$dmr.$h.log" 2>&1 &
 done
-wait
+wait || true   # tolerate dimer failures too
 
 ssh "{ssh_user}${{CAP_HOST}}" "cd '$REMOTE_OUT_DIR' && for d in cap_*; do (cd \\\"\$d\\\" && bash ./run_local.sh); done" \
-  > "$LOG_DIR/caps.$CAP_HOST.log" 2>&1
+  > "$LOG_DIR/caps.$CAP_HOST.log" 2>&1 || true
 
-python3 combine_results.py
+python3 combine_results.py || true   # combine handles missing outputs (None); don't abort
 """
 
 

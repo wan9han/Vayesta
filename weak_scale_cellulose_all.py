@@ -50,7 +50,11 @@ def exec_submit(out_dir):
             print(f"    {p}", flush=True)
         raise FileNotFoundError(f"{sub} -- did gen_scale write it? check weak_scale_cellulose.py output above.")
     print(f"[run] submit_per_node_local.sh in {out_dir}", flush=True)
-    subprocess.run(["bash", str(sub)], cwd=str(out_dir), check=True)
+    r = subprocess.run(["bash", str(sub)], cwd=str(out_dir))   # tolerant: a job/combine
+    if r.returncode != 0:                                       # failure for ONE scale must not
+        print(f"[WARN] {out_dir.name}: submit rc={r.returncode} (some jobs or combine may have "  # block the rest
+              f"failed) -> continuing to next scale", flush=True)
+    return r.returncode
 
 
 def exec_dev_local(out_dir, siesta, procs):
