@@ -65,7 +65,13 @@ def run_scalability(args, work):
         cmd += ["--remote-out-dir", args.remote_out_dir]
     if args.hosts:
         cmd += ["--hosts", *args.hosts]
-    subprocess.run(cmd, cwd=str(REPO), check=False)
+    p = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True)
+    print(p.stdout)          # show Phase 2 output (gen + run prints)
+    if p.returncode != 0:
+        print(f"\n[!!] Phase 2 (scalability) exited non-zero (rc={p.returncode}).", flush=True)
+        print("[!!] stderr (last 3000 chars):", flush=True)
+        print(p.stderr[-3000:], flush=True)
+        print("[!!] Continuing to organize — scalability data may be incomplete.\n", flush=True)
 
 
 def parse_energy(siout: Path):
@@ -142,9 +148,9 @@ def organize(out: Path, corr_work, scal_work: Path, stdout_txt: str, args, skip_
 def write_summary(out, corr_result, scal_dst):
     lines = ["CELLULOSE I-beta SUITE — SUMMARY", "=" * 60, "",
              "## Correctness (MFCC+MBE(2) vs unified full chain)", ""]
-    ef = corr_result["E_full_ev"]
-    lines.append(f"  chain          : {corr_result['glucose']} glucose, solver {corr_result['solver']}")
-    lines.append(f"  E_full (unified): {ef} eV" if ef is not None else "  E_full: FAILED")
+    ef = corr_result.get("E_full_ev")
+    lines.append(f"  chain          : {corr_result.get('glucose','?')} glucose, solver {corr_result.get('solver','?')}")
+    lines.append(f"  E_full (unified): {ef} eV" if ef is not None else "  E_full: (not available)")
     for c in corr_result["cuts"]:
         nc = c.get("ncuts")
         lines.append(f"  --- {nc} cut(s) ---")

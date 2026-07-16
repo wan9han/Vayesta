@@ -41,7 +41,14 @@ def gen_scale(out_dir, gpn, n_nodes, hosts, remote_base, extra):
 
 def exec_submit(out_dir):
     sub = out_dir / "submit_per_node_local.sh"
-    print(f"[run] submit in {out_dir}", flush=True)
+    if not sub.exists():
+        print(f"[ERROR] submit_per_node_local.sh NOT FOUND in {out_dir}", flush=True)
+        print(f"  contents of {out_dir}:", flush=True)
+        import os
+        for p in sorted(os.listdir(out_dir)):
+            print(f"    {p}", flush=True)
+        raise FileNotFoundError(f"{sub} -- did gen_scale write it? check weak_scale_cellulose.py output above.")
+    print(f"[run] submit_per_node_local.sh in {out_dir}", flush=True)
     subprocess.run(["bash", str(sub)], cwd=str(out_dir), check=True)
 
 
