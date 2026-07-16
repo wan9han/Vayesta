@@ -620,6 +620,7 @@ def _render_submit_script(out: Path, args):
     ssh_user = f"{args.ssh_user}@" if args.ssh_user else ""
     return f"""#!/bin/bash
 set -euo pipefail
+shopt -s nullglob   # cap_* / dimer_* globs expand to nothing when empty (N=1 has 0 caps)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"

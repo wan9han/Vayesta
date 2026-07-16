@@ -75,8 +75,7 @@ def parse_energy(siout: Path):
     return float(ms[-1]) if ms else None
 
 
-def organize(out: Path, corr_work: Path, scal_work: Path, stdout_txt: str, args):
-    print("\n" + "#" * 70 + "\n# Phase 3: ORGANIZE\n" + "#" * 70, flush=True)
+def _organize_correctness(corr_work: Path, out: Path, stdout_txt: str, args):
     # ---- correctness/unified (full-chain LOG only; no heavy SIESTA outputs) ----
     uni = out / "correctness" / "unified"; uni.mkdir(parents=True, exist_ok=True)
     if (corr_work / "full" / "siesta.out").exists():
@@ -87,13 +86,11 @@ def organize(out: Path, corr_work: Path, scal_work: Path, stdout_txt: str, args)
     frag = out / "correctness" / "fragmented"; frag.mkdir(parents=True, exist_ok=True)
     if (corr_work / "combine.log").exists():
         shutil.copy2(corr_work / "combine.log", frag / "combine.log")
-    # collect every per-job dir the validator made (f*/c*/d*) with its siesta.out
     per_job = {}
     for d in sorted(corr_work.iterdir()):
         if d.is_dir() and (d / "siesta.out").exists():
             shutil.copy2(d / "siesta.out", frag / f"{d.name}.siesta.out")
             per_job[d.name] = parse_energy(d / "siesta.out")
-    # parse the validator stdout for per-cut MFCC/MBE(2)
     result = {"E_full_ev": e_full, "solver": args.correctness_solver,
               "glucose": args.correctness_glucose, "per_job_ev": per_job, "cuts": []}
     cur = None
@@ -111,6 +108,17 @@ def organize(out: Path, corr_work: Path, scal_work: Path, stdout_txt: str, args)
                 cur["mbe2_err_ev"] = float(mm.group(2))
                 cur["mbe2_err_per_cut_ev"] = float(mm.group(3))
     (out / "correctness" / "fragmented" / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    return result
+
+
+def organize(out: Path, corr_work, scal_work: Path, stdout_txt: str, args, skip_correctness=False):
+    print("\n" + "#" * 70 + "\n# Phase 3: ORGANIZE\n" + "#" * 70, flush=True)
+    if skip_correctness:
+        rj = out / "correctness" / "fragmented" / "result.json"
+        result = json.loads(rj.read_text()) if rj.exists() else {"E_full_ev": None, "cuts": []}
+        print(f"[skip] correctness already done -> reuse {out / 'correctness'}", flush=True)
+    else:
+        result = _organize_correctness(corr_work, out, stdout_txt, args)
 
     # ---- scalability (LOGS + jsons only: no .ion/.BONDS/.XV/_pseudos/etc.) ----
     scal_dst = out / "scalability"; scal_dst.mkdir(parents=True, exist_ok=True)
@@ -180,13 +188,21 @@ def main():
     args = ap.parse_args()
 
     out = Path(args.out_root); out.mkdir(parents=True, exist_ok=True)
+    # skip Phase 1 if correctness already organized in a previous run
+    corr_done = (out / "correctness" / "fragmented" / "result.json").exists()
+
     raw = out / "_raw"; raw.mkdir(exist_ok=True)
-    corr_work = raw / "correctness"; corr_work.mkdir(exist_ok=True)
+    corr_work = None
+    stdout_txt = ""
+    if corr_done:
+        print(f"\n[skip] correctness already done -> reuse {out / 'correctness'}\n", flush=True)
+    else:
+        corr_work = raw / "correctness"; corr_work.mkdir(exist_ok=True)
+        stdout_txt = run_correctness(args, corr_work)
     scal_work = raw / "scalability"
 
-    stdout_txt = run_correctness(args, corr_work)
     run_scalability(args, scal_work)
-    organize(out, corr_work, scal_work, stdout_txt, args)
+    organize(out, corr_work, scal_work, stdout_txt, args, skip_correctness=corr_done)
 
     # clean raw (keep only the organized tree)
     shutil.rmtree(raw, ignore_errors=True)
