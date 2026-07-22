@@ -181,10 +181,13 @@ def main(argv=None):
     print(f"E_full = {e_full:.4f} eV\n" if e_full else "E_full FAILED\n")
 
     for nc in args.cuts:
-        if nc > len(bonds):
+        # cut only INTERNAL glycine-glycine peptide bonds (exclude ACE-N0 and
+        # C'n-NME cap bonds at the ends of the list)
+        internal = bonds[1:-1] if len(bonds) > 2 else bonds
+        if nc > len(internal):
             continue
-        step = max(1, len(bonds) // (nc + 1))
-        cuts = [bonds[k * step] for k in range(nc)]
+        step = max(1, len(internal) // (nc + 1))
+        cuts = [internal[k * step] for k in range(nc)]
         print(f"=== {nc} cut(s) ===")
 
         frags, caps, comp = fragment(mol, cuts)
